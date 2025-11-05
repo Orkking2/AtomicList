@@ -1,0 +1,7 @@
+[package]
+name = "atomic_list"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+haphazard = "0.1.8"
