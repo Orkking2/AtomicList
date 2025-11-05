@@ -1,15 +1,19 @@
+//! Hazard-pointer backed guard for nodes stored in the list.
+
 use std::{ops::Deref, ptr::NonNull};
 
 use haphazard::{AtomicPtr, Domain, HazardPointer};
 
 use crate::{AtomicListFamily, node_ptr::NodePtr};
 
+/// Protects a node loaded from an [`AtomicPtr`] using a hazard pointer.
 pub struct PointerGuard<'a, T> {
     _hp: HazardPointer<'a, AtomicListFamily>,
     ptr: NonNull<T>,
 }
 
 impl<'a, T: Sync + Send> PointerGuard<'a, T> {
+    /// Create a guard for the pointer stored in `atm_ptr`.
     pub fn new(
         atm_ptr: &AtomicPtr<T, AtomicListFamily, NodePtr<T>>,
         domain: &'a Domain<AtomicListFamily>,
@@ -21,6 +25,7 @@ impl<'a, T: Sync + Send> PointerGuard<'a, T> {
         Some(Self { _hp: hp, ptr: node })
     }
 
+    /// Expose the protected raw pointer.
     pub fn ptr(&self) -> NonNull<T> {
         self.ptr.clone()
     }

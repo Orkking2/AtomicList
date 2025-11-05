@@ -57,8 +57,7 @@ assert!(removed);
 
 // Iterators hold hazard pointers so each step is synchronized with other walkers.
 for guard in list.iter().take(4) {
-    let item = &*guard; // Dereferencing the guard is safe while it is in scope.
-    println!("saw {item}");
+    println!("saw {}", **guard);
 }
 ```
 

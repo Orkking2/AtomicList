@@ -1,3 +1,5 @@
+//! Core lock-free list implementation built on hazard pointers.
+
 use std::ptr;
 
 use haphazard::{AtomicPtr, Domain, raw::Pointer};
@@ -7,14 +9,14 @@ use crate::{
     pointer_guard::PointerGuard,
 };
 
-/// Minimal lock-free singly linked list that allows multiple producers to
-/// append nodes while agreeing on the insertion point via a predicate.
+/// Lock-free circular list with hazard-pointer based memory reclamation.
 pub struct AtomicList<T: Sync + Send> {
     domain: Domain<AtomicListFamily>,
     root: AtomicPtr<AtomicListNode<T>, AtomicListFamily, NodePtr<AtomicListNode<T>>>,
 }
 
 impl<T: Sync + Send> AtomicList<T> {
+    /// Create an empty list with its own hazard-pointer domain.
     pub fn new() -> Self {
         Self {
             domain: Domain::new(&AtomicListFamily),
@@ -22,16 +24,15 @@ impl<T: Sync + Send> AtomicList<T> {
         }
     }
 
+    /// Borrow the domain that governs hazard pointers issued by this list.
     pub fn domain(&self) -> &Domain<AtomicListFamily> {
         &self.domain
     }
 
-    /// Insert a value immediately before the first node whose reference causes the
-    /// predicate to return `true`. When the list is empty the element is always
-    /// inserted. The call loops until it can install the node.
+    /// Insert `elem` immediately before the first node for which `predicate` returns `true`.
     ///
-    /// Intended for pushing blocks where predicate is `Block::is_full`.
-    /// Specifically, it looks for the first block which has not been fully conusmed.
+    /// When the list is empty the new node becomes the root. Several threads can call this
+    /// method concurrently; it will keep retrying until the splice succeeds.
     pub fn push_before<F: Fn(&T) -> bool>(&self, elem: T, predicate: F) {
         let new_node = AtomicListNode::new_self_linked(elem);
 
@@ -84,8 +85,10 @@ impl<T: Sync + Send> AtomicList<T> {
         }
     }
 
-    /// Mark the first node for which predicate is `true` for reclamation.
-    /// Returns true if we successfully marked a node for retirement, false otherwise.
+    /// Remove the first node for which `predicate` returns `true`.
+    ///
+    /// Returns `true` if a node was detached and scheduled for reclamation, or `false` if the
+    /// list completed a full traversal without finding a match.
     pub fn pop_when<F: Fn(&T) -> bool>(&self, predicate: F) -> bool {
         if let Some(root) = self.root() {
             let root_ptr = root.ptr();
@@ -127,18 +130,22 @@ impl<T: Sync + Send> AtomicList<T> {
         }
     }
 
-    /// Returns the current root pointer for use with `next_if`.
-    /// Returns null if the list is empty.
+    /// Guard the current root node if the list is non-empty.
+    ///
+    /// The returned [`PointerGuard`] keeps the node alive until the guard is dropped.
     pub fn root<'a>(&'a self) -> Option<PointerGuard<'a, AtomicListNode<T>>> {
         PointerGuard::new(&self.root, &self.domain)
     }
 
+    /// Guard the node that currently follows the root.
     pub fn next<'a>(&'a self) -> Option<PointerGuard<'a, AtomicListNode<T>>> {
         self.root().map(|guard| guard.next(&self.domain)).flatten()
     }
 
-    /// Attempts to push root forward one step. Returns `next` if we are able to set it,
-    /// since this can avoid a loading of root.
+    /// Attempt to advance the root pointer to its successor.
+    ///
+    /// Returns `Some` when the root still matched `expected_current` and could be moved,
+    /// otherwise `None`.
     pub fn next_if<'a, 'b>(
         &'a self,
         expected_current: PointerGuard<'b, AtomicListNode<T>>,
@@ -158,6 +165,7 @@ impl<T: Sync + Send> AtomicList<T> {
             .flatten()
     }
 
+    /// Construct an iterator that repeatedly walks the ring.
     pub fn iter<'a>(&'a self) -> AtomicListIter<'a, T> {
         AtomicListIter::from(self)
     }
