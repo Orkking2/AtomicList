@@ -1,11 +1,9 @@
+use crate::{AtomicListFamily, node_ptr::NodePtr, pointer_guard::PointerGuard};
+use haphazard::{AtomicPtr, Domain};
 use std::{
     ops::Deref,
     ptr::{self, NonNull},
 };
-
-use haphazard::{AtomicPtr, Domain};
-
-use crate::{AtomicListFamily, node_ptr::NodePtr, pointer_guard::PointerGuard};
 
 pub struct AtomicListNode<T> {
     pub(crate) next: AtomicPtr<Self, AtomicListFamily, NodePtr<AtomicListNode<T>>>,

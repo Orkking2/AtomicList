@@ -1,13 +1,11 @@
 //! Core lock-free list implementation built on hazard pointers.
 
-use std::ptr;
-
-use haphazard::{AtomicPtr, Domain, raw::Pointer};
-
 use crate::{
     AtomicListFamily, list_iter::AtomicListIter, node::AtomicListNode, node_ptr::NodePtr,
     pointer_guard::PointerGuard,
 };
+use haphazard::{AtomicPtr, Domain, raw::Pointer};
+use std::ptr;
 
 /// Lock-free circular list with hazard-pointer based memory reclamation.
 pub struct AtomicList<T: Sync + Send> {

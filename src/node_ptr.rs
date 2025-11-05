@@ -1,6 +1,5 @@
-use std::{ops::Deref, ptr::NonNull};
-
 use haphazard::raw::Pointer;
+use std::{ops::Deref, ptr::NonNull};
 
 pub struct NodePtr<T> {
     inner: NonNull<T>,

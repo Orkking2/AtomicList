@@ -1,10 +1,8 @@
 //! Hazard-pointer backed guard for nodes stored in the list.
 
-use std::{ops::Deref, ptr::NonNull};
-
-use haphazard::{AtomicPtr, Domain, HazardPointer};
-
 use crate::{AtomicListFamily, node_ptr::NodePtr};
+use haphazard::{AtomicPtr, Domain, HazardPointer};
+use std::{ops::Deref, ptr::NonNull};
 
 /// Protects a node loaded from an [`AtomicPtr`] using a hazard pointer.
 pub struct PointerGuard<'a, T> {
