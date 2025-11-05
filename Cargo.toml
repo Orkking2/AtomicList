@@ -2,6 +2,13 @@
 name = "atomic_list"
 version = "0.1.0"
 edition = "2024"
+description = "Lock-free circular list guarded by hazard pointers for safe iteration and reclamation."
+license = "MIT"
+repository = "https://github.com/orkking2/AtomicList"
+documentation = "https://docs.rs/atomic_list"
+readme = "README.md"
+keywords = ["lock-free", "hazard-pointers", "concurrency", "data-structure"]
+categories = ["concurrency", "data-structures"]
 
 [dependencies]
 haphazard = "0.1.8"
