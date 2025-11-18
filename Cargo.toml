@@ -9,6 +9,3 @@ documentation = "https://docs.rs/atomic_list"
 readme = "README.md"
 keywords = ["lock-free", "hazard-pointers", "concurrency", "data-structure"]
 categories = ["concurrency", "data-structures"]
-
-[dependencies]
-haphazard = "0.1.8"
