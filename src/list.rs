@@ -4,7 +4,6 @@ use crate::{
     OptNode,
     atm_p::CASErr,
     cursor::Cursor,
-    list_iter::AtomicListIter,
     sync::{Node, RawExt},
 };
 use std::sync::atomic::Ordering;
