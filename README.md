@@ -33,7 +33,7 @@ and remove nodes inserted elsewhere under exclusive access.
 
 ## Working with nodes
 
-`sync::Node<T>` behaves a lot like an `Arc<T>` plus an embedded `next` pointer:
+`sync::Node<T>` behaves a lot like an `Arc<T>` plus an embedded `next` and `next_weak` pointer:
 
 - Cloning a `Node<T>` simply bumps the strong count.
 - `Node::into_inner` returns `Some(T)` if the caller held the last strong reference,
