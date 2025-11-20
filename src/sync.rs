@@ -386,15 +386,34 @@ impl<T: PartialEq> PartialEq for Node<T> {
     fn eq(&self, other: &Self) -> bool {
         (**self).eq(&**other)
     }
+
+    fn ne(&self, other: &Self) -> bool {
+        (**self).ne(&**other)
+    }
 }
+impl<T: Eq> Eq for Node<T> {}
 
 impl<T: PartialOrd> PartialOrd for Node<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         (**self).partial_cmp(&**other)
     }
-}
 
-impl<T: Eq> Eq for Node<T> {}
+    fn lt(&self, other: &Self) -> bool {
+        (**self).lt(&**other)
+    }
+
+    fn le(&self, other: &Self) -> bool {
+        (**self).le(&**other)
+    }
+
+    fn gt(&self, other: &Self) -> bool {
+        (**self).gt(&**other)
+    }
+
+    fn ge(&self, other: &Self) -> bool {
+        (**self).ge(&**other)
+    }
+}
 
 impl<T: Ord> Ord for Node<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
