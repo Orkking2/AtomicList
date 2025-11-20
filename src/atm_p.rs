@@ -297,14 +297,7 @@ impl<T, P: Clone + RawExt<T>> Clone for AtomicP<T, P> {
 
 impl<T, P: RawExt<T>> Drop for AtomicP<T, P> {
     fn drop(&mut self) {
-        // Safe because &mut self guarantees no concurrent access.
-        let raw = *self.ptr.get_mut();
-
-        if !raw.is_null() {
-            unsafe {
-                drop(P::from_raw(raw));
-            }
-        }
+        drop(self.take(Ordering::Relaxed));
     }
 }
 
