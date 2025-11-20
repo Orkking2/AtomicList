@@ -176,7 +176,7 @@ impl<T> Node<T> {
 
         // Here we guarantee the safety of NonNullAtomicP::null
         strong.store(this.clone(), Ordering::Relaxed);
-        weak.store(Self::downgrade(&this), Ordering::Relaxed);
+        weak.store(this.downgrade(), Ordering::Relaxed);
 
         this
     }
@@ -347,26 +347,26 @@ impl<T> Node<T> {
     /// drop(node);
     /// assert!(weak.upgrade().is_none());
     /// ```
-    pub fn downgrade(this: &Self) -> WeakNode<T> {
-        let mut cur = this.inner().weak.load(Ordering::Relaxed);
+    pub fn downgrade(&self) -> WeakNode<T> {
+        let mut cur = self.inner().weak.load(Ordering::Relaxed);
 
         loop {
             if cur == usize::MAX {
                 hint::spin_loop();
-                cur = this.inner().weak.load(Ordering::Relaxed);
+                cur = self.inner().weak.load(Ordering::Relaxed);
                 continue;
             }
 
             assert!(cur <= MAX_REFCOUNT, "{}", INTERNAL_OVERFLOW_ERROR);
 
-            match this.inner().weak.compare_exchange_weak(
+            match self.inner().weak.compare_exchange_weak(
                 cur,
                 cur + 1,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    return WeakNode { ptr: this.ptr };
+                    return WeakNode { ptr: self.ptr };
                 }
                 Err(old) => cur = old,
             }
@@ -379,6 +379,50 @@ impl<T> Node<T> {
     /// wrappers.
     pub fn load_next_strong(&self) -> Self {
         self.next().strong.load(Ordering::Acquire)
+    }
+
+    pub fn load_next_strong_unique(&self) -> Option<Self> {
+        let next = self.load_next_strong();
+
+        if Self::ptr_eq(self, &next) {
+            None
+        } else {
+            Some(next)
+        }
+    }
+
+    pub fn load_next_weak(&self) -> WeakNode<T> {
+        self.next().weak.load(Ordering::Acquire)
+    }
+
+    pub fn load_next_weak_unique(&self) -> Option<WeakNode<T>> {
+        let next = self.load_next_weak();
+
+        if self.weak_ptr_eq(&next) {
+            None
+        } else {
+            Some(next)
+        }
+    }
+
+    pub fn find_next_strong(&self) -> Option<Self> {
+        if let Some(strong_next) = self.load_next_strong_unique() {
+            Some(strong_next)
+        } else {
+            if let Some(weak_next) = self.load_next_weak_unique() {
+                if let Some(strong_next) = weak_next.upgrade() {
+                    Some(strong_next)
+                } else {
+                    weak_next.find_next_strong()
+                }
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn weak_ptr_eq(&self, rhs: &WeakNode<T>) -> bool {
+        ptr::addr_eq(Node::as_ptr(self), WeakNode::as_ptr(rhs))
     }
 }
 
@@ -602,6 +646,37 @@ impl<T> WeakNode<T> {
 
     pub fn next(&self) -> &NonNullAtomicWeakNode<T> {
         self.inner().next
+    }
+
+    pub fn load_next(&self) -> WeakNode<T> {
+        self.next().load(Ordering::Acquire)
+    }
+
+    pub fn load_next_unique(&self) -> Option<WeakNode<T>> {
+        let next = self.load_next();
+
+        if Self::ptr_eq(self, &next) {
+            None
+        } else {
+            Some(next)
+        }
+    }
+
+    pub fn find_next_strong(&self) -> Option<Node<T>> {
+        let mut next = self.load_next_unique()?;
+
+        loop {
+            if let Some(strong_next) = next.upgrade() {
+                break Some(strong_next)
+            } else {
+                if let Some(weak_next) = next.load_next_unique() {
+                    next = weak_next;
+                    continue;
+                } else {
+                    break None;
+                }
+            }
+        }
     }
 
     #[inline]

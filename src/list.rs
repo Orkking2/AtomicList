@@ -3,7 +3,7 @@
 use crate::{
     OptNode,
     atm_p::CASErr,
-    cursor::Cursor,
+    cursor::CursorP,
     sync::{Node, RawExt},
 };
 use std::sync::atomic::Ordering;
@@ -106,8 +106,8 @@ impl<T: Sync + Send> AtomicList<T> {
         }
     }
 
-    pub fn cursor(&self) -> Option<Cursor<T, Node<T>>> {
-        self.root.clone().map(|node| Cursor::new(node))
+    pub fn cursor(&self) -> Option<CursorP<T, Node<T>>> {
+        self.root.clone().map(|node| CursorP::new(node))
     }
 }
 
