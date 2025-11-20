@@ -71,7 +71,7 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
     /// loading `self` again (drop is always allowed).
     /// No method should be called on `Self` besides store.
     pub unsafe fn take(&self, order: Ordering) -> P {
-        self.inner.take(order).unwrap()
+        unsafe { self.inner.take(order).unwrap_unchecked() }
     }
 
     pub fn store(&self, new: P, order: Ordering) {
@@ -111,6 +111,10 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
             self.inner
                 .compare_exchange_unchecked(current, new, success, failure)
         }
+    }
+
+    pub fn into_p(self) -> P {
+        unsafe { ptr_to_p(self.inner.ptr.swap(ptr::null_mut(), Ordering::Relaxed)) }
     }
 }
 
@@ -206,7 +210,7 @@ impl<T, P: RawExt<T>> AtomicP<T, P> {
     /// Take the value out of the cell (cell becomes empty).
     /// The returned Arc owns what used to be the cell's strong ref.
     pub fn take(&self, order: Ordering) -> Option<P> {
-        self.swap(None, order)
+        unsafe { ptr_to_opt_p(self.ptr.swap(ptr::null_mut(), order)) }
     }
 
     /// Safety:
@@ -284,6 +288,10 @@ impl<T, P: RawExt<T>> AtomicP<T, P> {
                 })
             }
         }
+    }
+
+    pub fn try_into_p(self) -> Option<P> {
+        self.take(Ordering::Relaxed)
     }
 }
 
