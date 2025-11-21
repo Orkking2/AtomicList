@@ -1,11 +1,11 @@
 [package]
 name = "atomic_list"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-description = "Lock-free circular list guarded by hazard pointers for safe iteration and reclamation."
+description = "Lock-free circular ring of intrusive ref-counted nodes plus shared cursors."
 license = "MIT"
 repository = "https://github.com/orkking2/AtomicList"
 documentation = "https://docs.rs/atomic_list"
 readme = "README.md"
-keywords = ["lock-free", "hazard-pointers", "concurrency", "data-structure"]
+keywords = ["lock-free", "intrusive", "concurrency", "data-structure", "cursor"]
 categories = ["concurrency", "data-structures"]

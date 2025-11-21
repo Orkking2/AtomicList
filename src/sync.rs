@@ -1,4 +1,4 @@
-use crate::atm_p::{NonNullAtomicNode, NonNullAtomicWeakNode};
+use crate::atm_p::{CASErr, NonNullAtomicNode, NonNullAtomicWeakNode};
 use std::{
     borrow::Borrow,
     fmt,
@@ -179,6 +179,233 @@ impl<T> Node<T> {
         weak.store(this.downgrade(), Ordering::Relaxed);
 
         this
+    }
+
+    /// Insert `elem` before the first successor that satisfies `predicate`.
+    ///
+    /// Traverses the circular ring starting at `self`, splices a new node in
+    /// front of the first match, and returns `Err(elem)` if no match is found
+    /// after a full lap so the caller can recover ownership.
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    ///
+    /// let root = Node::new("root");
+    ///
+    /// // Insert a worker right before the element matching "root".
+    /// root.push_before("worker-1", |cur| **cur == "root")
+    ///     .expect("insert before root");
+    ///
+    /// // The ring now goes: root -> worker-1 -> root.
+    /// assert_eq!(**root.load_next_strong(), "worker-1");
+    /// assert!(Node::ptr_eq(
+    ///     &root.load_next_strong().load_next_strong(),
+    ///     &root
+    /// ));
+    /// ```
+    ///
+    /// Treats self as a root into the atomic list of which this node is a node
+    pub fn push_before<F: Fn(&T) -> bool>(&self, elem: T, predicate: F) -> Result<(), T> {
+        let new_node = Node::new(elem);
+
+        // Walk the ring looking for the first node whose value satisfies the predicate,
+        // splicing the new node in immediately before that successor.
+        let mut current = self.clone();
+
+        loop {
+            let next = current.load_next_strong();
+
+            if predicate(&next) {
+                // Pre-link the new node so that, if the CAS succeeds, the ring is valid in
+                // a single atomic write to `current.next`.
+                new_node
+                    .next()
+                    .strong
+                    .store(next.clone(), Ordering::Release);
+
+                // Attempt to install the new node as `current.next`. If another thread
+                // changed the pointer in the meantime, restart with the observed successor
+                // so we keep following the live ring.
+                match current.next().strong.compare_exchange(
+                    &current,
+                    new_node.clone(),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break Ok(()),
+                    Err(CASErr { new, .. }) => drop(new),
+                }
+            }
+
+            current = next;
+
+            // We have circled back to the start without finding a match; return the
+            // element to the caller rather than leaking the allocation.
+            if Node::ptr_eq(self, &current) {
+                break Err(Node::try_unwrap(new_node)
+                    .map_err(|_| "unwrapping Node<T> failure")
+                    .expect("new_node has not been given to any AtomicNode's"));
+            }
+        }
+    }
+
+    /// Remove and return the first successor whose value satisfies `predicate`.
+    ///
+    /// Starts at `self.next` and only checks `self` after completing a full lap
+    /// of the ring. If `self` is likely to match, check it manually before
+    /// calling `pop_when` to avoid an extra `clone` of `self`; the clone is
+    /// cheap, but skipping it is a small optimization.
+    ///
+    /// On removal, the returned node's **strong** `next` is reset to refer to
+    /// itself, so it no longer keeps the list alive. Its **weak** `next`
+    /// continues to point into the list so `find_next_strong` can still locate
+    /// the current successor if the node is reinserted later.
+    ///
+    /// Returns `None` if a full lap completes without finding a match.
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    ///
+    /// let root = Node::new("root");
+    /// root.push_before("temp", |cur| **cur == "root").unwrap();
+    ///
+    /// // Remove the node holding "temp".
+    /// let removed = root
+    ///     .pop_when(|cur| **cur == "temp")
+    ///     .expect("found matching node");
+    /// assert_eq!(**removed, "temp");
+    ///
+    /// // The removed node now owns only a self-looping strong edge.
+    /// assert!(Node::ptr_eq(&removed.load_next_strong(), &removed));
+    ///
+    /// // The ring closes back into a singleton, and weak navigation from the
+    /// // removed node still finds the live list.
+    /// assert!(Node::ptr_eq(&root.load_next_strong(), &root));
+    /// assert!(Node::ptr_eq(&removed.find_next_strong().unwrap(), &root));
+    /// ```
+    pub fn pop_when<F: Fn(&T) -> bool>(&self, predicate: F) -> Option<Self> {
+        // Track the node whose successor we are inspecting; removing happens by
+        // relinking that successor around the matching node.
+        let mut current = self.clone();
+
+        loop {
+            let next = current.load_next_strong();
+
+            if predicate(&next) {
+                // Capture `next`'s successor up front so a successful CAS can bypass
+                // `next` in one step.
+                let new_next = next.load_next_strong();
+
+                // Try to swing `current.next` from `next` to `new_next`. A failure means
+                // the list changed underneath us, so follow the observed successor and
+                // continue searching.
+                match current.next().strong.compare_exchange(
+                    &next,
+                    new_next.clone(),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(old) => {
+                        // Detach the removed node's strong edge so it no longer owns the
+                        // list, but keep a weak edge so it can still find the live ring.
+                        old.next()
+                            .weak
+                            .store(new_next.downgrade(), Ordering::Release);
+                        old.next()
+                            .strong
+                            .store(old.clone(), Ordering::Release);
+
+                        break Some(old);
+                    }
+                    Err(CASErr {
+                        // This is the actual next of current as of this moment.
+                        actual: next,
+                        ..
+                    }) => {
+                        current = next;
+                    }
+                }
+            }
+
+            // Completed a full traversal without a match.
+            if Node::ptr_eq(self, &current) {
+                break None;
+            }
+        }
+    }
+
+    /// Remove this node from the ring without cloning it first.
+    ///
+    /// Finds a predecessor, swings its `next` pointer around `self`, and returns
+    /// a node that remains in the list (the successor) if one exists. If the
+    /// ring only contains `self`, the function leaves the self-loop intact and
+    /// returns `None`.
+    ///
+    /// After a successful removal:
+    /// - `self.next().strong` is reset to a self-loop so this node no longer
+    ///   owns the ring.
+    /// - `self.next().weak` still points into the ring so `find_next_strong`
+    ///   can locate the current successor later.
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    /// let root = Node::new("root");
+    /// root.push_before("worker", |cur| **cur == "root").unwrap();
+    ///
+    /// // Remove the root in-place without cloning it.
+    /// let survivor = root.remove_self().expect("another node remains");
+    /// assert!(Node::ptr_eq(&survivor, &root));
+    ///
+    /// // `root` now has a self-looping strong edge but can still find the live ring.
+    /// assert!(Node::ptr_eq(&root.load_next_strong(), &root));
+    /// assert!(Node::ptr_eq(&root.find_next_strong().unwrap(), &survivor));
+    /// ```
+    pub fn remove_self(&self) -> Option<Self> {
+        // Fast path: singleton ring. Keep links self-referential.
+        let successor = self.load_next_strong();
+        if Node::ptr_eq(self, &successor) {
+            self.next().weak.store(self.downgrade(), Ordering::Release);
+            self.next().strong.store(successor, Ordering::Release);
+            return None;
+        }
+
+        // Search for a predecessor whose next points to `self`.
+        let mut pred = successor.clone();
+        loop {
+            let next = pred.load_next_strong();
+
+            if Node::ptr_eq(&next, self) {
+                let new_next = successor.clone();
+
+                match pred.next().strong.compare_exchange(
+                    &next,
+                    new_next.clone(),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // Detach self's ownership of the ring but keep a weak breadcrumb.
+                        self.next()
+                            .weak
+                            .store(new_next.downgrade(), Ordering::Release);
+                        self.next().strong.store(self.clone(), Ordering::Release);
+
+                        return Some(new_next);
+                    }
+                    Err(CASErr { actual, .. }) => {
+                        pred = actual;
+                        continue;
+                    }
+                }
+            }
+
+            pred = next;
+
+            // If we looped the ring without finding a stable predecessor, abort.
+            if Node::ptr_eq(&pred, self) {
+                return None;
+            }
+        }
     }
 
     /// Obtain a raw pointer to the stored payload.
@@ -376,11 +603,34 @@ impl<T> Node<T> {
     /// Convenience for acquiring the current strong successor.
     ///
     /// This lets callers walk the ring without manually touching the atomic
-    /// wrappers.
+    /// wrappers. If the node currently has a self-loop (for example, after it
+    /// was removed by `pop_when`), this returns `self`.
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    /// let root = Node::new(1);
+    /// root.push_before(2, |cur| **cur == 1).unwrap();
+    /// assert_eq!(**root.load_next_strong(), 2);
+    /// ```
     pub fn load_next_strong(&self) -> Self {
         self.next().strong.load(Ordering::Acquire)
     }
 
+    /// Load the strong successor, returning `None` when the edge is a self-loop.
+    ///
+    /// Handy for traversal code that wants to stop when it finds the end of a
+    /// temporarily detached node.
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    /// let root = Node::new("root");
+    ///
+    /// // A singleton ring has no unique successor.
+    /// assert!(root.load_next_strong_unique().is_none());
+    ///
+    /// root.push_before("next", |cur| **cur == "root").unwrap();
+    /// assert_eq!(root.load_next_strong_unique().unwrap().to_string(), "next");
+    /// ```
     pub fn load_next_strong_unique(&self) -> Option<Self> {
         let next = self.load_next_strong();
 
@@ -391,10 +641,12 @@ impl<T> Node<T> {
         }
     }
 
+    /// Load the weak successor of this node.
     pub fn load_next_weak(&self) -> WeakNode<T> {
         self.next().weak.load(Ordering::Acquire)
     }
 
+    /// Load the weak successor, returning `None` when the edge is a self-loop.
     pub fn load_next_weak_unique(&self) -> Option<WeakNode<T>> {
         let next = self.load_next_weak();
 
@@ -405,6 +657,22 @@ impl<T> Node<T> {
         }
     }
 
+    /// Find the next reachable strong node, following weak links as needed.
+    ///
+    /// If the strong edge is a self-loop (e.g., a node popped out of the list),
+    /// this follows the weak edge until it can upgrade to a live strong node or
+    /// returns `None` if the search falls off the ring entirely.
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    /// let root = Node::new("root");
+    /// root.push_before("temp", |cur| **cur == "root").unwrap();
+    ///
+    /// let removed = root.pop_when(|cur| **cur == "temp").unwrap();
+    /// assert!(Node::ptr_eq(&removed.load_next_strong(), &removed));
+    /// // Weak edge still points into the ring, so we can walk back to root.
+    /// assert!(Node::ptr_eq(&removed.find_next_strong().unwrap(), &root));
+    /// ```
     pub fn find_next_strong(&self) -> Option<Self> {
         if let Some(strong_next) = self.load_next_strong_unique() {
             Some(strong_next)
@@ -667,7 +935,7 @@ impl<T> WeakNode<T> {
 
         loop {
             if let Some(strong_next) = next.upgrade() {
-                break Some(strong_next)
+                break Some(strong_next);
             } else {
                 if let Some(weak_next) = next.load_next_unique() {
                     next = weak_next;

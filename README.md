@@ -1,86 +1,79 @@
 # AtomicList
 
-`AtomicList` is an experimental circular linked list built from intrusive,
-reference-counted nodes. Each element lives inside a `sync::Node<T>`, which embeds
-its successor pointer and uses atomic reference counts that resemble a hand-rolled
-`Arc`. Splicing and removal are expressed as compare-and-swap loops on those
-next pointers, so the data structure can stay lock-free internally even though
-the public API is still conservative about aliasing.
+`AtomicList` is an experimental circular list built directly from intrusive,
+reference-counted nodes. The crate ships nodes and cursors only—there is no
+separate list container—so you keep a `Node<T>` (and optionally a shared
+`cursor::Cursor`) as your handle into the ring. A `sync::Node<T>` acts like a
+tiny `Arc<T>` that also stores **strong** and **weak** successors, letting CAS
+loops splice nodes in and out of a ring without locks or external hazard-pointer
+schemes.
 
-Unlike an earlier iteration of this crate, the current implementation does **not**
-use hazard pointers or the `haphazard` crate. Inserts require `&mut self`, and the
-ring never exposes iterators or automatic retirement hooks yet.
-
-## What is implemented today
-- **Circular storage.** The first inserted node becomes the root of the ring and every
-  new node keeps a strong pointer to its successor via `NonNullAtomicNode<T>`.
-- **Predicate-based insertion.** `AtomicList::push_before` allocates a new node and
-  attempts to splice it before the first element whose value satisfies the predicate.
-  If no element matches after a full traversal the function returns `Err(elem)` so
-  the caller can recover ownership.
-- **Predicate-based removal.** `AtomicList::pop_when` walks the ring, detaches the
-  first matching node with a CAS, and returns it as `Option<Node<T>>`. Nodes act as
-  guards – you can keep reading through `Deref` or reclaim the payload with
-  `Node::into_inner`.
-- **Manual traversal helpers (WIP).** `AtomicList::cursor` hands out a `cursor::Cursor`
-  rooted at the current `Node<T>`. The cursor only stores the pointer today, so any
-  higher-level iteration logic still has to be written manually on top of it.
-
-Because `push_before` requires `&mut self`, the structure is not yet shareable
-between threads even though the internals rely on atomics. `pop_when` can be invoked
-through shared references, so it may be used by read-only consumers that observe
-and remove nodes inserted elsewhere under exclusive access.
+## Current surface area
+- `Node<T>` / `WeakNode<T>`: Arc/Weak-like handles with embedded successor edges.
+- Lock-free splice helpers: `push_before`, `pop_when`, and `remove_self` rearrange
+  a ring while maintaining the self-loop invariants on detached nodes.
+- Successor introspection: `load_next_*` plus `find_next_strong` follow weak
+  breadcrumbs after a node has been popped out.
+- Shared traversal: `cursor::Cursor` is an atomic cursor that multiple holders
+  advance together.
+- Reusable atomics: `atm_p` exports generic atomic pointer wrappers used by the
+  list but also usable for `Arc`/`Weak`.
 
 ## Working with nodes
 
-`sync::Node<T>` behaves a lot like an `Arc<T>` plus an embedded `next` and `next_weak` pointer:
-
-- Cloning a `Node<T>` simply bumps the strong count.
-- `Node::into_inner` returns `Some(T)` if the caller held the last strong reference,
-  otherwise it yields `None`.
-- Dropping a `Node<T>` automatically decrements the count and, once it reaches zero,
-  tears down the stored successor pointer and payload.
-
-`pop_when` hands ownership of a removed node back to the caller, so you can either
-inspect it via `Deref<Target = T>` or reclaim the payload when you know no other
-strong references exist.
-
-## Example
-
 ```rust
-use atomic_list::{list::AtomicList, sync::Node};
+use atomic_list::sync::Node;
 
-fn main() {
-    let mut list = AtomicList::new();
+let root = Node::new("root");
+root.push_before("worker-1", |cur| **cur == "root").unwrap();
+root.push_before("worker-2", |_| true).unwrap();
 
-    // First insertion initializes the ring with a single node.
-    list.push_before("root", |_| true).expect("insert root");
+// Remove the first node whose payload ends with "1".
+let removed = root.pop_when(|cur| cur.ends_with('1')).unwrap();
+assert_eq!(**removed, "worker-1");
 
-    // Insert another value before the element that equals "root".
-    list.push_before("worker-1", |cur| *cur == "root")
-        .expect("insert worker");
+// The ring closes back over the gap.
+assert_eq!(root.load_next_strong().to_string(), "worker-2");
+assert!(Node::ptr_eq(
+    &root.load_next_strong().load_next_strong(),
+    &root
+));
 
-    // Remove the first node equal to "root".
-    if let Some(node) = list.pop_when(|cur| *cur == "root") {
-        // Node<T> dereferences to &T for as long as the guard lives.
-        assert_eq!(**node, "root");
-        // Or reclaim ownership when we know we hold the last ref.
-        assert_eq!(Node::into_inner(node), Some("root"));
-    }
-}
+// Detached nodes keep a weak breadcrumb into the live ring.
+assert_eq!(
+    removed.find_next_strong().unwrap().to_string(),
+    "root"
+);
+assert_eq!(Node::into_inner(removed), Some("worker-1"));
 ```
 
-## Implementation notes
+## Coordinated traversal
 
-The list stores a single `Option<Node<T>>` called `root` (`src/list.rs`). Every node
-starts as a singleton ring by pointing its `next` field back to itself. Insertion
-allocates a fresh node, copies the successor pointer from the node it should precede,
-and uses `compare_exchange` to swing the predecessor toward the new node. Removal
-performs the inverse operation.
+```rust
+use atomic_list::{cursor::Cursor, sync::Node};
 
-The custom atomic pointer types live in `src/atm_p.rs` and `src/sync.rs`. They wrap
-raw pointers with manual reference counting tailored to this structure, which is why
-the crate currently has no external dependencies.
+let head = Node::new(0);
+for i in 1..=3 {
+    head.push_before(i, |_| true).unwrap();
+}
+
+// Multiple holders share the same atomic cursor position.
+let mut cursor_a = Cursor::new(head.clone());
+let mut cursor_b = cursor_a.clone();
+
+assert_eq!(*cursor_a.next().unwrap(), 3);
+assert_eq!(*cursor_b.next().unwrap(), 3);
+
+// Advancing from either handle moves everyone forward.
+assert_eq!(*cursor_a.next().unwrap(), 2);
+assert_eq!(*cursor_b.next().unwrap(), 2);
+```
+
+## Notes
+- Pure atomics: no hazard pointers or epoch GC, just ref-counted nodes.
+- There is no separate `AtomicList` struct; hang on to a `Node<T>` as your entry
+  point into the ring.
+- The API is experimental and may still shift as iteration ergonomics improve.
 
 ## License
 
