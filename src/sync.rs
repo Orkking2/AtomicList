@@ -311,9 +311,7 @@ impl<T> Node<T> {
                         old.next()
                             .weak
                             .store(new_next.downgrade(), Ordering::Release);
-                        old.next()
-                            .strong
-                            .store(old.clone(), Ordering::Release);
+                        old.next().strong.store(old.clone(), Ordering::Release);
 
                         break Some(old);
                     }
@@ -689,6 +687,17 @@ impl<T> Node<T> {
         }
     }
 
+    /// Compare `self` and a `WeakNode` by address of the underlying payload.
+    ///
+    /// Useful when you need to check identity across strong/weak references
+    /// without upgrading the weak pointer.
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    /// let node = Node::new(10);
+    /// let weak = node.downgrade();
+    /// assert!(node.weak_ptr_eq(&weak));
+    /// ```
     pub fn weak_ptr_eq(&self, rhs: &WeakNode<T>) -> bool {
         ptr::addr_eq(Node::as_ptr(self), WeakNode::as_ptr(rhs))
     }
