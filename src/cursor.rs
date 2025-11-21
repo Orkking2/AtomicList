@@ -35,7 +35,15 @@ where
 
     /// Try to reclaim the backing pointer when this is the last cursor.
     pub fn into_p(this: Self) -> Option<P> {
-        Arc::try_unwrap(this.atm_ptr).ok().map(|p| p.into_p())
+        Arc::into_inner(this.atm_ptr).map(|p| p.into_p())
+    }
+
+    pub fn try_unwrap(this: Self) -> Result<P, Self> {
+        let Self { atm_ptr, current } = this;
+
+        Arc::try_unwrap(atm_ptr)
+            .map(|p| p.into_p())
+            .map_err(|atm_ptr| Self { atm_ptr, current })
     }
 }
 
