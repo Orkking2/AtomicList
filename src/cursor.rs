@@ -3,7 +3,10 @@ use crate::{
     atm_p::{CASErr, NonNullAtomicP},
     sync::{Node, RawExt},
 };
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    ops::Deref,
+    sync::{Arc, atomic::Ordering},
+};
 
 /// Atomic cursor specialized for [`Node`]-backed rings.
 ///
@@ -38,7 +41,7 @@ pub type Cursor<T> = CursorP<T, Node<T>>;
 /// cursor semantics.
 pub struct CursorP<T, P = Node<T>>
 where
-    P: RawExt<T> + Clone,
+    P: RawExt<T>,
 {
     atm_ptr: Arc<NonNullAtomicP<T, P>>,
     current: P,
@@ -46,10 +49,13 @@ where
 
 impl<T, P> CursorP<T, P>
 where
-    P: RawExt<T> + Clone,
+    P: RawExt<T>,
 {
     /// Start a shared cursor at `node`.
-    pub fn new(node: P) -> Self {
+    pub fn new(node: P) -> Self
+    where
+        P: Clone,
+    {
         Self {
             current: node.clone(),
             atm_ptr: Arc::new(NonNullAtomicP::new(node)),
@@ -65,7 +71,7 @@ where
     ///
     /// Returns `Ok(P)` when this was the only live cursor; otherwise yields
     /// back the cursor for continued shared use.
-    /// 
+    ///
     /// If you are not interested in the potential Err(Self), use [`into_p`](Self::into_p)
     /// instead, as it optimizes for the guaranteed drop of self.
     pub fn try_unwrap(this: Self) -> Result<P, Self> {
@@ -74,6 +80,17 @@ where
         Arc::try_unwrap(atm_ptr)
             .map(NonNullAtomicP::into_p)
             .map_err(|atm_ptr| Self { atm_ptr, current })
+    }
+}
+
+impl<T, P> Deref for CursorP<T, P>
+where
+    P: RawExt<T> + Deref<Target = T>,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.current
     }
 }
 
