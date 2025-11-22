@@ -1,10 +1,14 @@
+//! Shared atomic cursors for coordinated traversal.
 use crate::{
     atm_p::{CASErr, NonNullAtomicP},
     sync::{Node, RawExt},
 };
 use std::sync::{Arc, atomic::Ordering};
 
-/// Alias for the common node-backed cursor.
+/// Atomic cursor specialized for [`Node`]-backed rings.
+///
+/// This is the ergonomic entry point when you need to walk or coordinate around
+/// `Node<T>` values. For other pointer types, see the generic [`CursorP`].
 pub type Cursor<T> = CursorP<T, Node<T>>;
 
 /// Shared iteration cursor backed by an atomic pointer.
@@ -14,6 +18,24 @@ pub type Cursor<T> = CursorP<T, Node<T>>;
 /// holder. This allows callers to build independent “head” and “tail” cursors
 /// that can be moved in separate tasks while still coordinating which node
 /// each cursor refers to.
+///
+/// ```
+/// use atomic_list::{cursor::Cursor, sync::Node};
+///
+/// let head = Node::new("root");
+/// head.push_before("tail", |_| true).unwrap();
+///
+/// let mut a = Cursor::new(head.clone());
+/// let mut b = a.clone();
+///
+/// // Either cursor advancing updates the shared position for all holders.
+/// assert_eq!(a.next().as_deref(), Some(&"tail"));
+/// assert_eq!(b.next().as_deref(), Some(&"tail"));
+/// ```
+///
+/// The `P` parameter lets advanced callers plug in alternative pointer types
+/// that implement [`RawExt`], such as `Arc`/`Weak`, while retaining the shared
+/// cursor semantics.
 pub struct CursorP<T, P = Node<T>>
 where
     P: RawExt<T> + Clone,
@@ -26,6 +48,7 @@ impl<T, P> CursorP<T, P>
 where
     P: RawExt<T> + Clone,
 {
+    /// Start a shared cursor at `node`.
     pub fn new(node: P) -> Self {
         Self {
             current: node.clone(),
@@ -35,14 +58,21 @@ where
 
     /// Try to reclaim the backing pointer when this is the last cursor.
     pub fn into_p(this: Self) -> Option<P> {
-        Arc::into_inner(this.atm_ptr).map(|p| p.into_p())
+        Arc::into_inner(this.atm_ptr).map(NonNullAtomicP::into_p)
     }
 
+    /// Attempt to unwrap the cursor into its backing pointer.
+    ///
+    /// Returns `Ok(P)` when this was the only live cursor; otherwise yields
+    /// back the cursor for continued shared use.
+    /// 
+    /// If you are not interested in the potential Err(Self), use [`into_p`](Self::into_p)
+    /// instead, as it optimizes for the guaranteed drop of self.
     pub fn try_unwrap(this: Self) -> Result<P, Self> {
         let Self { atm_ptr, current } = this;
 
         Arc::try_unwrap(atm_ptr)
-            .map(|p| p.into_p())
+            .map(NonNullAtomicP::into_p)
             .map_err(|atm_ptr| Self { atm_ptr, current })
     }
 }
@@ -62,6 +92,9 @@ where
 impl<T> Iterator for CursorP<T, Node<T>> {
     type Item = Node<T>;
 
+    /// Yield the next node while following any position published by sibling
+    /// cursors. If another holder advances first, this cursor observes that
+    /// move and aligns to the shared node before continuing traversal.
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             // Acquire to observe any node another thread published.
