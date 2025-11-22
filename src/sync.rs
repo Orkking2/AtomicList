@@ -1,4 +1,7 @@
-use crate::atm_p::{CASErr, NonNullAtomicNode, NonNullAtomicWeakNode};
+use crate::{
+    atm_p::{CASErr, NonNullAtomicNode, NonNullAtomicWeakNode},
+    cursor::Cursor,
+};
 use std::{
     borrow::Borrow,
     fmt,
@@ -139,6 +142,27 @@ pub struct Node<T> {
     ptr: NonNull<NodeInner<T>>,
 }
 
+/// Local iterator that walks a ring once, starting from a given node.
+///
+/// Each call to [`Iterator::next`] yields the current node and advances to its
+/// successor via [`Node::find_next_strong`]. Iteration stops after the iterator
+/// would wrap back to the starting node or if the traversal falls off the ring
+/// (e.g., the nodes were detached).
+pub struct UniqueNodeIter<T> {
+    start: Option<Node<T>>,
+    next: Option<Node<T>>,
+}
+
+/// A local iterator that walks the ring that a node is a component of.
+/// 
+/// If and when this iterator reaches the last node and returns None for 
+/// the first time, it will drop the node it is holding onto, so it does
+/// not need to be dropped itself for list deallocation, it just needs
+/// to run out.
+pub struct NodeIter<T> {
+    current: Option<Node<T>>,
+}
+
 impl<T> Deref for Node<T> {
     type Target = T;
 
@@ -154,7 +178,7 @@ impl<T> Node<T> {
     /// use atomic_list::sync::Node;
     ///
     /// let node = Node::new("root");
-    /// assert_eq!(**node, "root");
+    /// assert_eq!(*node, "root");
     /// // The initial successor is the node itself.
     /// assert!(Node::ptr_eq(&node, &node.load_next_strong()));
     /// ```
@@ -181,6 +205,29 @@ impl<T> Node<T> {
         this
     }
 
+    /// Firstly we remove ourself from any list of which we are a part.
+    ///
+    /// Then we consider that the indication that a node is a singleton in a
+    /// list vs a free node is whether or not its weak_next refers to itself
+    /// or to a different allocation. If it points to self, then we are a valid
+    /// list, but if it points to someone else, then they are the list and we
+    /// are a popped (free) node.
+    pub fn into_new_ring(self) -> Self {
+        drop(self.remove_self());
+
+        self.next().weak.store(self.downgrade(), Ordering::Release);
+        self
+    }
+
+    /// As mentioned in [`into_new_ring`](Self::into_new_ring), the indication
+    /// of whether we are a free node or part of a list is whether out weak_next
+    /// points to ourselves or to another node, given of course that our strong
+    /// already points to self.
+    pub fn is_list(&self) -> bool {
+        Self::ptr_eq(&self.next().strong.load(Ordering::Acquire), self)
+            && self.weak_ptr_eq(&self.next().weak.load(Ordering::Acquire))
+    }
+
     /// Insert `elem` before the first successor that satisfies `predicate`.
     ///
     /// Traverses the circular ring starting at `self`, splices a new node in
@@ -193,11 +240,11 @@ impl<T> Node<T> {
     /// let root = Node::new("root");
     ///
     /// // Insert a worker right before the element matching "root".
-    /// root.push_before("worker-1", |cur| **cur == "root")
+    /// root.push_before("worker-1", |cur| *cur == "root")
     ///     .expect("insert before root");
     ///
     /// // The ring now goes: root -> worker-1 -> root.
-    /// assert_eq!(**root.load_next_strong(), "worker-1");
+    /// assert_eq!(*root.load_next_strong(), "worker-1");
     /// assert!(Node::ptr_eq(
     ///     &root.load_next_strong().load_next_strong(),
     ///     &root
@@ -227,7 +274,7 @@ impl<T> Node<T> {
                 // changed the pointer in the meantime, restart with the observed successor
                 // so we keep following the live ring.
                 match current.next().strong.compare_exchange(
-                    &current,
+                    &next,
                     new_node.clone(),
                     Ordering::AcqRel,
                     Ordering::Relaxed,
@@ -267,13 +314,13 @@ impl<T> Node<T> {
     /// # use atomic_list::sync::Node;
     ///
     /// let root = Node::new("root");
-    /// root.push_before("temp", |cur| **cur == "root").unwrap();
+    /// root.push_before("temp", |cur| *cur == "root").unwrap();
     ///
     /// // Remove the node holding "temp".
     /// let removed = root
-    ///     .pop_when(|cur| **cur == "temp")
+    ///     .pop_when(|cur| *cur == "temp")
     ///     .expect("found matching node");
-    /// assert_eq!(**removed, "temp");
+    /// assert_eq!(*removed, "temp");
     ///
     /// // The removed node now owns only a self-looping strong edge.
     /// assert!(Node::ptr_eq(&removed.load_next_strong(), &removed));
@@ -348,11 +395,11 @@ impl<T> Node<T> {
     /// ```
     /// # use atomic_list::sync::Node;
     /// let root = Node::new("root");
-    /// root.push_before("worker", |cur| **cur == "root").unwrap();
+    /// root.push_before("worker", |cur| *cur == "root").unwrap();
     ///
     /// // Remove the root in-place without cloning it.
     /// let survivor = root.remove_self().expect("another node remains");
-    /// assert!(Node::ptr_eq(&survivor, &root));
+    /// assert_eq!(*survivor, "worker");
     ///
     /// // `root` now has a self-looping strong edge but can still find the live ring.
     /// assert!(Node::ptr_eq(&root.load_next_strong(), &root));
@@ -411,6 +458,11 @@ impl<T> Node<T> {
         let ptr: *mut NodeInner<T> = NonNull::as_ptr(this.ptr);
 
         unsafe { &raw mut (*ptr).data }
+    }
+
+    /// Check if two nodes point to the same allocation.
+    pub fn ptr_eq(lhs: &Self, rhs: &Self) -> bool {
+        RawExt::ptr_eq(lhs, rhs)
     }
 
     /// Try to reclaim the payload, treating the self-loop as the only other strong ref.
@@ -473,7 +525,7 @@ impl<T> Node<T> {
     ///
     /// let shared = Node::new(7);
     /// let alias = shared.clone();
-    /// assert!(Node::try_unwrap(shared).is_err());
+    /// assert!(Node::try_unwrap(shared.clone()).is_err());
     /// drop(alias);
     /// assert_eq!(Node::try_unwrap(shared), Ok(7));
     /// ```
@@ -607,8 +659,8 @@ impl<T> Node<T> {
     /// ```
     /// # use atomic_list::sync::Node;
     /// let root = Node::new(1);
-    /// root.push_before(2, |cur| **cur == 1).unwrap();
-    /// assert_eq!(**root.load_next_strong(), 2);
+    /// root.push_before(2, |cur| *cur == 1).unwrap();
+    /// assert_eq!(*root.load_next_strong(), 2);
     /// ```
     pub fn load_next_strong(&self) -> Self {
         self.next().strong.load(Ordering::Acquire)
@@ -626,7 +678,7 @@ impl<T> Node<T> {
     /// // A singleton ring has no unique successor.
     /// assert!(root.load_next_strong_unique().is_none());
     ///
-    /// root.push_before("next", |cur| **cur == "root").unwrap();
+    /// root.push_before("next", |cur| *cur == "root").unwrap();
     /// assert_eq!(root.load_next_strong_unique().unwrap().to_string(), "next");
     /// ```
     pub fn load_next_strong_unique(&self) -> Option<Self> {
@@ -664,9 +716,9 @@ impl<T> Node<T> {
     /// ```
     /// # use atomic_list::sync::Node;
     /// let root = Node::new("root");
-    /// root.push_before("temp", |cur| **cur == "root").unwrap();
+    /// root.push_before("temp", |cur| *cur == "root").unwrap();
     ///
-    /// let removed = root.pop_when(|cur| **cur == "temp").unwrap();
+    /// let removed = root.pop_when(|cur| *cur == "temp").unwrap();
     /// assert!(Node::ptr_eq(&removed.load_next_strong(), &removed));
     /// // Weak edge still points into the ring, so we can walk back to root.
     /// assert!(Node::ptr_eq(&removed.find_next_strong().unwrap(), &root));
@@ -685,6 +737,48 @@ impl<T> Node<T> {
                 None
             }
         }
+    }
+
+    /// Create a local iterator that walks this ring once starting at `self`.
+    ///
+    /// The iterator yields `self` first, then advances successors using
+    /// [`find_next_strong`](Self::find_next_strong). Iteration ends after a
+    /// full lap or if traversal cannot find another strong node (for example,
+    /// when the node has been detached).
+    ///
+    /// ```
+    /// # use atomic_list::sync::Node;
+    /// let root = Node::new("root");
+    /// root.push_before("worker-1", |cur| *cur == "root").unwrap();
+    /// root.push_before("worker-2", |_| true).unwrap();
+    ///
+    /// let seen: Vec<_> = root.unique_iter_from().map(|n| n.to_string()).collect();
+    /// assert_eq!(seen.len(), 3);
+    /// assert!(seen.contains(&"root".to_string()));
+    /// ```
+    pub fn unique_iter_from(&self) -> UniqueNodeIter<T> {
+        UniqueNodeIter {
+            start: Some(self.clone()),
+            next: Some(self.clone()),
+        }
+    }
+
+    /// Build a shared `Cursor` rooted at this node.
+    ///
+    /// Clones the node and seeds a new [`cursor::Cursor`] so callers can
+    /// coordinate traversal across threads.
+    ///
+    /// ```
+    /// use atomic_list::{cursor::Cursor, sync::Node};
+    ///
+    /// let head = Node::new(0);
+    /// let mut cursor: Cursor<_> = head.cursor();
+    /// assert!(cursor.next().is_none());
+    /// head.push_before(1, |_| true).unwrap();
+    /// assert_eq!(*cursor.next().unwrap(), 1);
+    /// ```
+    pub fn cursor(&self) -> Cursor<T> {
+        Cursor::new(self.clone())
     }
 
     /// Compare `self` and a `WeakNode` by address of the underlying payload.
@@ -801,6 +895,43 @@ impl<T> Clone for Node<T> {
         assert!(old_size <= MAX_REFCOUNT, "{}", INTERNAL_OVERFLOW_ERROR);
 
         Self { ptr: self.ptr }
+    }
+}
+
+impl<T> Iterator for NodeIter<T> {
+    type Item = Node<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.current.take()?;
+
+        self.current = current.find_next_strong();
+
+        self.current.clone()
+    }
+}
+
+impl<T> Iterator for UniqueNodeIter<T> {
+    type Item = Node<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.start.as_ref()?;
+        let current = self.next.take()?;
+
+        let successor = current.find_next_strong();
+
+        self.next = successor.and_then(|next| {
+            if Node::ptr_eq(&next, &start) {
+                None
+            } else {
+                Some(next)
+            }
+        });
+
+        if self.next.is_none() {
+            drop(self.start.take());
+        }
+
+        Some(current)
     }
 }
 

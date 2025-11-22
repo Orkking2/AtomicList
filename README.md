@@ -21,16 +21,16 @@ schemes.
 
 ## Working with nodes
 
-```rust
+```rust,no_run
 use atomic_list::sync::Node;
 
 let root = Node::new("root");
-root.push_before("worker-1", |cur| **cur == "root").unwrap();
+root.push_before("worker-1", |cur| *cur == "root").unwrap();
 root.push_before("worker-2", |_| true).unwrap();
 
 // Remove the first node whose payload ends with "1".
 let removed = root.pop_when(|cur| cur.ends_with('1')).unwrap();
-assert_eq!(**removed, "worker-1");
+assert_eq!(*removed, "worker-1");
 
 // The ring closes back over the gap.
 assert_eq!(root.load_next_strong().to_string(), "worker-2");

@@ -6,5 +6,5 @@ pub mod atm_p;
 pub mod cursor;
 pub mod sync;
 
+#[cfg(test)]
 mod tests;
-
