@@ -4,6 +4,7 @@ use crate::{
     sync::{Node, RawExt},
 };
 use std::{
+    borrow::Borrow,
     ops::Deref,
     sync::{Arc, atomic::Ordering},
 };
@@ -103,6 +104,24 @@ where
             atm_ptr: Arc::clone(&self.atm_ptr),
             current: self.current.clone(),
         }
+    }
+}
+
+impl<T, P> AsRef<T> for CursorP<T, P>
+where
+    P: RawExt<T> + AsRef<T>,
+{
+    fn as_ref(&self) -> &T {
+        self.current.as_ref()
+    }
+}
+
+impl<T, P> Borrow<T> for CursorP<T, P>
+where
+    P: RawExt<T> + Borrow<T>,
+{
+    fn borrow(&self) -> &T {
+        self.current.borrow()
     }
 }
 
