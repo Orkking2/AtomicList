@@ -1,3 +1,25 @@
+//! Atomic storage for pointer-like smart pointers.
+//!
+//! `AtomicP` mirrors the ergonomics of `AtomicPtr`, but it works with any `P`
+//! that implements [`RawExt`]. That trait is satisfied by types such as
+//! [`Arc`](std::sync::Arc), [`Weak`](std::sync::Weak), and the custom
+//! [`Node`](crate::sync::Node) / [`WeakNode`](crate::sync::WeakNode) pairs used
+//! throughout this crate. The contract is that `P` can be losslessly converted
+//! to and from a `*const T` without running constructors or destructors. This
+//! lets `AtomicP` exchange ownership by only manipulating raw pointers.
+//!
+//! Every atomic operation converts `P` to a raw pointer on the way in and
+//! reconstructs it from the raw pointer on the way out. No drops happen inside
+//! the atomic operations themselves; ref counts are adjusted by `from_raw` /
+//! `into_raw` on the edges. This mirrors how `AtomicPtr` behaves and keeps the
+//! control structures of `P` (like the ref counts inside `Arc`/`Weak`) in charge
+//! of lifecycle.
+//!
+//! Because the contract is only about raw-pointer roundtrips, users can define
+//! additional pointer types with custom control structures (for example,
+//! `Arc`-like wrappers around intrusive nodes) and still gain atomic sharing by
+//! plugging them into `AtomicP`.
+
 use crate::sync::{Node, RawExt, WeakNode};
 use std::{
     marker::PhantomData,
@@ -9,10 +31,14 @@ use std::{
     },
 };
 
+/// An atomic cell for [`Arc`](std::sync::Arc).
 pub type AtomicArc<T> = AtomicP<T, Arc<T>>;
+/// An atomic cell for [`Weak`](std::sync::Weak).
 pub type AtomicWeak<T> = AtomicP<T, Weak<T>>;
 
+/// An atomic cell for [`Node`](crate::sync::Node).
 pub type AtomicNode<T> = AtomicP<T, Node<T>>;
+/// An atomic cell for [`WeakNode`](crate::sync::WeakNode).
 pub type AtomicWeakNode<T> = AtomicP<T, WeakNode<T>>;
 
 pub type NonNullAtomicNode<T> = NonNullAtomicP<T, Node<T>>;
@@ -22,6 +48,11 @@ pub type NonNullAtomicWeakNode<T> = NonNullAtomicP<T, WeakNode<T>>;
 /// which is technically invalid (for the sake of the methods) it can still be dropped safely.
 #[repr(transparent)]
 #[derive(Clone)]
+/// An [`AtomicP`] that promises to avoid the null state in normal use.
+///
+/// This is a convenience wrapper for call sites that do not want to juggle
+/// `Option<P>`. Construction still goes through [`AtomicP`] and is therefore
+/// subject to the same raw-pointer contract; dropping behaves identically.
 pub struct NonNullAtomicP<T, P: RawExt<T>> {
     inner: AtomicP<T, P>,
 }
@@ -118,12 +149,28 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
     }
 }
 
+/// An atomic cell for pointer-like smart pointers.
+///
+/// `P` must implement [`RawExt`], which promises that it can roundtrip through
+/// a `*const T` without constructing or destroying the underlying allocation.
+/// `AtomicP` relies on that promise to perform atomic operations directly on
+/// raw pointers, skipping destructor calls on stores and constructor work on
+/// loads. Control structures embedded in `P` (such as ref counts inside
+/// [`Arc`](std::sync::Arc) or the custom [`Node`](crate::sync::Node)) stay
+/// responsible for lifecycle.
 pub struct AtomicP<T, P: RawExt<T>> {
     ptr: AtomicPtr<T>,
     _marker: PhantomData<P>,
 }
 
 impl<T, P: RawExt<T>> AtomicP<T, P> {
+    /// Create a new atomic cell containing `p`.
+    ///
+    /// No destructor is run when storing `p`; the value is turned into a raw
+    /// pointer via [`RawExt::into_raw`] and written directly. Likewise,
+    /// reconstructing a value on subsequent loads relies solely on
+    /// [`RawExt::from_raw`], so any ref counting or control state embedded in
+    /// `P` remains authoritative.
     pub fn new(p: P) -> Self {
         let raw = P::into_raw(p);
 
@@ -141,7 +188,12 @@ impl<T, P: RawExt<T>> AtomicP<T, P> {
         }
     }
 
-    /// Produces an extra P that doesn't get dropped.
+    /// Load the current value, cloning to preserve ref counts.
+    ///
+    /// This converts the raw pointer back into `P` and immediately clones it,
+    /// so the returned value is an *additional* handle (e.g. one more `Arc`).
+    /// The clone keeps ref counting balanced while the original raw pointer
+    /// stays in the atomic cell.
     pub fn load(&self, order: Ordering) -> Option<P>
     where
         P: Clone,
@@ -176,6 +228,10 @@ impl<T, P: RawExt<T>> AtomicP<T, P> {
         }
     }
 
+    /// Load without cloning, returning a `ManuallyDrop` wrapper.
+    ///
+    /// This exposes the exact pointer stored in the cell without touching ref
+    /// counts. The caller must ensure the pointer remains valid.
     pub unsafe fn load_manuallydrop_unchecked(&self, order: Ordering) -> ManuallyDrop<P> {
         unsafe { ManuallyDrop::new(P::from_raw(self.ptr.load(order))) }
     }
@@ -187,10 +243,12 @@ impl<T, P: RawExt<T>> AtomicP<T, P> {
         self.ptr.load(order)
     }
 
-    /// Swap the stored `Arc<T>` with a new one, returning the old one.
+    /// Swap the stored pointer-like `P` with a new one, returning the old one.
     ///
-    /// If `new` is `Some`, the cell takes ownership of its ref.
-    /// If `new` is `None`, the cell becomes empty.
+    /// If `new` is `Some`, the cell takes ownership of its ref (by writing the
+    /// raw pointer). If `new` is `None`, the cell becomes empty. No drop occurs
+    /// inside the atomic operation; the returned value should be dropped by the
+    /// caller if it is not needed.
     pub fn swap(&self, new: Option<P>, order: Ordering) -> Option<P> {
         unsafe { ptr_to_opt_p(self.ptr.swap(opt_p_to_ptr(new), order)) }
     }
@@ -203,12 +261,20 @@ impl<T, P: RawExt<T>> AtomicP<T, P> {
         unsafe { ptr_to_p(self.ptr.swap(p_to_ptr(new), order)) }
     }
 
+    /// Store a new value, replacing whatever was inside.
+    ///
+    /// The incoming `P` is turned into a raw pointer; no destructor runs for
+    /// the overwritten value until it is dropped by whoever receives it from
+    /// [`swap`](Self::swap) or [`take`](Self::take).
     pub fn store(&self, new: P, order: Ordering) {
         drop(self.swap(Some(new), order))
     }
 
     /// Take the value out of the cell (cell becomes empty).
-    /// The returned Arc owns what used to be the cell's strong ref.
+    /// The returned pointer-like `P` owns what used to be the cell's ref.
+    ///
+    /// As with other operations, the transfer happens via raw pointers—no
+    /// destructors run inside the atomic primitive.
     pub fn take(&self, order: Ordering) -> Option<P> {
         unsafe { ptr_to_opt_p(self.ptr.swap(ptr::null_mut(), order)) }
     }
@@ -246,7 +312,7 @@ impl<T, P: RawExt<T>> AtomicP<T, P> {
         }
     }
 
-    /// On success: you get the old `Arc<T>` that was in the cell.
+    /// On success: you get the old pointer-like `P` that was in the cell.
     ///
     /// On failure: you get back both your `new` with no overal ref count change,
     /// and what is essentially a `load` of the previous value, which should just be dropped if not needed.
@@ -309,6 +375,11 @@ impl<T, P: RawExt<T>> Drop for AtomicP<T, P> {
     }
 }
 
+/// Error returned by compare-and-swap operations.
+///
+/// The caller receives both what was actually found in the cell and the
+/// `new` value they attempted to write (reconstructed via `from_raw`) so ref
+/// counts remain balanced.
 pub struct CASErr<T> {
     pub actual: T,
     pub new: T,

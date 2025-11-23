@@ -1,4 +1,5 @@
 //! Shared atomic cursors for coordinated traversal.
+
 use crate::{
     atm_p::{CASErr, NonNullAtomicP},
     sync::{Node, RawExt},
@@ -38,7 +39,7 @@ pub type Cursor<T> = CursorP<T, Node<T>>;
 /// ```
 ///
 /// The `P` parameter lets advanced callers plug in alternative pointer types
-/// that implement [`RawExt`], such as `Arc`/`Weak`, while retaining the shared
+/// that implement [`RawExt`], such as [`Arc`]/[`Weak`], while retaining the shared
 /// cursor semantics.
 pub struct CursorP<T, P = Node<T>>
 where
