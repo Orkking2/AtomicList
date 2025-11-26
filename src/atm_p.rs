@@ -44,15 +44,13 @@ pub type AtomicWeakNode<T> = AtomicP<T, WeakNode<T>>;
 pub type NonNullAtomicNode<T> = NonNullAtomicP<T, Node<T>>;
 pub type NonNullAtomicWeakNode<T> = NonNullAtomicP<T, WeakNode<T>>;
 
-/// Drop of NonNullAtomicP is exactly the drop of AtomicP, so even if it is in the null state
-/// which is technically invalid (for the sake of the methods) it can still be dropped safely.
-#[repr(transparent)]
-#[derive(Clone)]
 /// An [`AtomicP`] that promises to avoid the null state in normal use.
 ///
 /// This is a convenience wrapper for call sites that do not want to juggle
 /// `Option<P>`. Construction still goes through [`AtomicP`] and is therefore
 /// subject to the same raw-pointer contract; dropping behaves identically.
+#[repr(transparent)]
+#[derive(Clone)]
 pub struct NonNullAtomicP<T, P: RawExt<T>> {
     inner: AtomicP<T, P>,
 }
@@ -76,6 +74,7 @@ impl<T, P: RawExt<T>> From<NonNullAtomicP<T, P>> for AtomicP<T, P> {
 }
 
 impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
+    /// See [`AtomicP::new`]
     pub fn new(p: P) -> Self {
         Self {
             inner: AtomicP::new(p),
@@ -92,6 +91,9 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
         }
     }
 
+    /// Get a reference to the inner AtomicP. Generally
+    /// this is not necessary, but is exposed for 
+    /// convenience.
     pub fn as_atomic_p(&self) -> &AtomicP<T, P> {
         &self.inner
     }
@@ -100,19 +102,22 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
     ///
     /// Caller must ensure a valid store is called before
     /// loading `self` again (drop is always allowed).
-    /// No method should be called on `Self` besides store.
+    /// No method should be called on `Self` besides store (or drop).
     pub unsafe fn take(&self, order: Ordering) -> P {
         unsafe { self.inner.take(order).unwrap_unchecked() }
     }
 
+    /// See [`AtomicP::store`]
     pub fn store(&self, new: P, order: Ordering) {
         self.inner.store(new, order)
     }
 
+    /// See [`AtomicP::as_ptr`]
     pub fn as_ptr(&self, order: Ordering) -> *mut T {
         self.inner.as_ptr(order)
     }
 
+    /// See [`AtomicP::load_unchecked`]
     pub fn load(&self, order: Ordering) -> P
     where
         P: Clone,
@@ -120,14 +125,17 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
         unsafe { self.inner.load_unchecked(order) }
     }
 
+    /// See [`AtomicP::load_manuallydrop_unchecked`]
     pub fn load_noclone(&self, order: Ordering) -> ManuallyDrop<P> {
         unsafe { self.inner.load_manuallydrop_unchecked(order) }
     }
 
+    /// See [`AtomicP::swap`]
     pub fn swap(&self, new: P, order: Ordering) -> P {
         unsafe { self.inner.swap_unchecked(new, order) }
     }
 
+    /// See [`AtomicP::compare_exchange_unchecked`]
     pub fn compare_exchange(
         &self,
         current: &P,
@@ -144,8 +152,10 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
         }
     }
 
+    /// Convert `self` into the P that it holds. Safety
+    /// ensured by ownership requirement.
     pub fn into_p(self) -> P {
-        unsafe { ptr_to_p(self.inner.ptr.swap(ptr::null_mut(), Ordering::Relaxed)) }
+        unsafe { ptr_to_p(self.inner.ptr.swap(ptr::null_mut(), Ordering::AcqRel)) }
     }
 }
 

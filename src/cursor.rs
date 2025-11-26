@@ -5,24 +5,21 @@ use crate::{
     sync::{Node, RawExt},
 };
 use std::{
-    borrow::Borrow,
-    ops::Deref,
-    sync::{Arc, atomic::Ordering},
+    borrow::Borrow, iter::Peekable, ops::Deref, sync::{Arc, atomic::Ordering}
 };
 
 /// Atomic cursor specialized for [`Node`]-backed rings.
 ///
 /// This is the ergonomic entry point when you need to walk or coordinate around
-/// `Node<T>` values. For other pointer types, see the generic [`CursorP`].
+/// [`Node<T>`] values. For other pointer types, see the generic [`CursorP`].
 pub type Cursor<T> = CursorP<T, Node<T>>;
 
 /// Shared iteration cursor backed by an atomic pointer.
 ///
 /// Cloning a `CursorP` keeps both clones synchronized on the same atomically
 /// stored pointer, so advancing in one thread updates the view in every other
-/// holder. This allows callers to build independent “head” and “tail” cursors
-/// that can be moved in separate tasks while still coordinating which node
-/// each cursor refers to.
+/// holder. This allows callers to build independent cursors that can be moved 
+/// in separate tasks while still coordinating which node each cursor refers to.
 ///
 /// ```
 /// use atomic_list::{cursor::Cursor, sync::Node};
@@ -39,7 +36,7 @@ pub type Cursor<T> = CursorP<T, Node<T>>;
 /// ```
 ///
 /// The `P` parameter lets advanced callers plug in alternative pointer types
-/// that implement [`RawExt`], such as [`Arc`]/[`Weak`], while retaining the shared
+/// that implement [`RawExt<T>`], such as [`Arc`]/[`Weak`](std::sync::Weak), while retaining the shared
 /// cursor semantics.
 pub struct CursorP<T, P = Node<T>>
 where
@@ -62,6 +59,11 @@ where
             current: node.clone(),
             atm_ptr: Arc::new(NonNullAtomicP::new(node)),
         }
+    }
+
+    /// Get access to the underlying P that we are currently on.
+    pub fn get_p(this: &Self) -> &P {
+        &this.current
     }
 
     /// Try to reclaim the backing pointer when this is the last cursor.
@@ -137,7 +139,7 @@ impl<T> Iterator for CursorP<T, Node<T>> {
             // Acquire to observe any node another thread published.
             let loaded = self.atm_ptr.load(Ordering::Acquire);
 
-            // Fast path: nobody else has advanced the shared pointer yet.
+            // Nobody else has advanced the shared pointer yet.
             if Node::ptr_eq(&self.current, &loaded) {
                 let next = self.current.find_next_strong()?;
 

@@ -36,71 +36,118 @@ macro_rules! acquire {
 //     };
 // }
 
+/// Pointer-like interface expected by [`AtomicP`](crate::atm_p::AtomicP).
+///
+/// The implementor must be able to roundtrip through a `*const T` without
+/// running constructors or destructors. All atomic operations in `AtomicP`
+/// convert `P` to a raw pointer on store and reconstruct `P` from that pointer
+/// on load/compare-exchange, trusting the type’s internal control structure
+/// (e.g., ref counts in `Arc`/`Weak` or `Node`/`WeakNode`) to manage lifecycle.
 pub trait RawExt<T>
 where
     Self: Sized,
 {
+    /// Return the underlying pointer for identity comparisons.
+    ///
+    /// Implementations should mirror [`Arc::as_ptr`](std::sync::Arc::as_ptr) or
+    /// [`Node::as_ptr`](crate::sync::Node::as_ptr): no ref counts are touched
+    /// and the pointer stays valid as long as `self` is.
     fn as_ptr(this: &Self) -> *const T;
 
+    /// Pointer equality using [`as_ptr`](RawExt::as_ptr) by default.
     fn ptr_eq(lhs: &Self, rhs: &Self) -> bool {
         ptr::addr_eq(Self::as_ptr(lhs), Self::as_ptr(rhs))
     }
 
+    /// Consume `self` and yield the raw pointer without running a destructor.
+    ///
+    /// This must behave like [`Arc::into_raw`](std::sync::Arc::into_raw) or
+    /// [`Node::into_raw`](crate::sync::Node::into_raw): the allocation and
+    /// control block remain owned by the caller, with ref counts unchanged.
     fn into_raw(this: Self) -> *const T;
+
+    /// Recreate `Self` from a pointer produced by [`into_raw`](RawExt::into_raw).
+    ///
+    /// Implementations must treat the pointer as owned and restore whatever
+    /// control structure is needed (e.g., ref counts for
+    /// [`Arc`](std::sync::Arc) / [`Weak`](std::sync::Weak) or
+    /// [`Node`](crate::sync::Node) / [`WeakNode`](crate::sync::WeakNode)).
     unsafe fn from_raw(ptr: *const T) -> Self;
 }
 
 impl<T> RawExt<T> for Arc<T> {
+    /// Forwards [`Arc::as_ptr`]
     fn as_ptr(this: &Self) -> *const T {
         Self::as_ptr(this)
     }
 
+    /// Forwards [`Arc::ptr_eq`]
+    fn ptr_eq(lhs: &Self, rhs: &Self) -> bool {
+        Self::ptr_eq(lhs, rhs)
+    }
+
+    /// Forwards [`Arc::into_raw`]
     fn into_raw(this: Self) -> *const T {
         Self::into_raw(this)
     }
 
+    /// Forwards [`Arc::from_raw`]
     unsafe fn from_raw(ptr: *const T) -> Self {
         unsafe { Self::from_raw(ptr) }
     }
 }
 
 impl<T> RawExt<T> for Weak<T> {
+    /// Forwards [`Weak::as_ptr`]
     fn as_ptr(this: &Self) -> *const T {
         Self::as_ptr(this)
     }
 
+    /// Forwards [`Weak::ptr_eq`]
+    fn ptr_eq(lhs: &Self, rhs: &Self) -> bool {
+        Self::ptr_eq(lhs, rhs)
+    }
+
+    /// Forwards [`Weak::into_raw`]
     fn into_raw(this: Self) -> *const T {
         Self::into_raw(this)
     }
 
+    /// Forwards [`Weak::from_raw`]
     unsafe fn from_raw(ptr: *const T) -> Self {
         unsafe { Self::from_raw(ptr) }
     }
 }
 
 impl<T> RawExt<T> for Node<T> {
+    /// Forwards [`Node::as_ptr`]
     fn as_ptr(this: &Self) -> *const T {
         Self::as_ptr(this)
     }
 
+    /// Forwards [`Node::into_raw`]
     fn into_raw(this: Self) -> *const T {
         Self::into_raw(this)
     }
 
+    /// Forwards [`Node::from_raw`]
     unsafe fn from_raw(ptr: *const T) -> Self {
         unsafe { Self::from_raw(ptr) }
     }
 }
 
 impl<T> RawExt<T> for WeakNode<T> {
+    /// Forwards [`WeakNode::as_ptr`]
     fn as_ptr(this: &Self) -> *const T {
         Self::as_ptr(this)
     }
 
+    /// Forwards [`WeakNode::into_raw`]
     fn into_raw(this: Self) -> *const T {
         Self::into_raw(this)
     }
 
+    /// Forwards [`WeakNode::from_raw`]
     unsafe fn from_raw(ptr: *const T) -> Self {
         unsafe { Self::from_raw(ptr) }
     }
@@ -138,6 +185,9 @@ struct NodeInner<T> {
 /// nodes behave correctly: dropping or unwrapping the node treats the dependent
 /// `next` reference as if it were the caller’s, ensuring that no extra strong
 /// count remains.
+///
+/// A `Node` can either be a part of a ring or not. If it is a part of a ring,
+/// its next and weak_next will point to the same `next`.
 pub struct Node<T> {
     ptr: NonNull<NodeInner<T>>,
 }
@@ -154,8 +204,8 @@ pub struct UniqueNodeIter<T> {
 }
 
 /// A local iterator that walks the ring that a node is a component of.
-/// 
-/// If and when this iterator reaches the last node and returns None for 
+///
+/// If and when this iterator reaches the last node and returns None for
 /// the first time, it will drop the node it is holding onto, so it does
 /// not need to be dropped itself for list deallocation, it just needs
 /// to run out.
@@ -212,6 +262,8 @@ impl<T> Node<T> {
     /// or to a different allocation. If it points to self, then we are a valid
     /// list, but if it points to someone else, then they are the list and we
     /// are a popped (free) node.
+    /// 
+    /// Ownership mechanics are arbitrary tbh.
     pub fn into_new_ring(self) -> Self {
         drop(self.remove_self());
 
@@ -265,10 +317,20 @@ impl<T> Node<T> {
             if predicate(&next) {
                 // Pre-link the new node so that, if the CAS succeeds, the ring is valid in
                 // a single atomic write to `current.next`.
-                new_node
-                    .next()
-                    .strong
-                    .store(next.clone(), Ordering::Release);
+                let Next { strong, weak: _ } = new_node.next();
+
+                strong.store(next.clone(), Ordering::Release);
+
+                // We don't actually need to greedily assign a weak to this node.
+                // This is because popping a node (which is what modifies its strong
+                // edge) already updates that nodes weak to ensure that it can
+                // recover the live ring, even after detachment.
+                //
+                // The thought process goes: as long as we have a strong edge our weak
+                // edge is completely irrelevant. So modifications must only happen to
+                // our weak edge when (a) we are creating a new list, see `into_new_ring`
+                // or (b) we are modifying our strong edge, see `pop_when`. 
+                // weak.store(next.downgrade(), Ordering::Release);
 
                 // Attempt to install the new node as `current.next`. If another thread
                 // changed the pointer in the meantime, restart with the observed successor
@@ -279,7 +341,9 @@ impl<T> Node<T> {
                     Ordering::AcqRel,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => break Ok(()),
+                    Ok(_) => {
+                        break Ok(());
+                    }
                     Err(CASErr { new, .. }) => drop(new),
                 }
             }
@@ -365,7 +429,7 @@ impl<T> Node<T> {
                     Err(CASErr {
                         // This is the actual next of current as of this moment.
                         actual: next,
-                        ..
+                        new: _
                     }) => {
                         current = next;
                     }
@@ -388,9 +452,9 @@ impl<T> Node<T> {
     ///
     /// After a successful removal:
     /// - `self.next().strong` is reset to a self-loop so this node no longer
-    ///   owns the ring.
+    ///   holds an owning reference to the ring.
     /// - `self.next().weak` still points into the ring so `find_next_strong`
-    ///   can locate the current successor later.
+    ///   can recover a reference to the original ring.
     ///
     /// ```
     /// # use atomic_list::sync::Node;
@@ -461,6 +525,7 @@ impl<T> Node<T> {
     }
 
     /// Check if two nodes point to the same allocation.
+    /// Uses the default [`RawExt::ptr_eq`].
     pub fn ptr_eq(lhs: &Self, rhs: &Self) -> bool {
         RawExt::ptr_eq(lhs, rhs)
     }
@@ -516,7 +581,7 @@ impl<T> Node<T> {
         }
     }
 
-    /// Equivalent of `Arc::try_unwrap`, but aware of the implicit self edge.
+    /// Equivalent of [`Arc::try_unwrap`], but aware of the implicit self edge.
     ///
     /// ```
     /// # use atomic_list::sync::Node;
@@ -572,13 +637,13 @@ impl<T> Node<T> {
     }
 
     #[must_use = "losing the pointer will leak memory"]
-    /// Leak-safe escape hatch that turns a `Node<T>` into a raw pointer.
+    /// Leak-safe escape hatch that turns a [`Node<T>`] into a raw pointer.
     pub fn into_raw(this: Self) -> *const T {
         let this = ManuallyDrop::new(this);
         Self::as_ptr(&*this)
     }
 
-    /// Recreate a `Node<T>` from the pointer returned by `into_raw`.
+    /// Recreate a [`Node<T>`] from the pointer returned by [`into_raw`](Self::into_raw).
     pub unsafe fn from_raw(ptr: *const T) -> Self {
         Self {
             ptr: unsafe {
@@ -595,12 +660,12 @@ impl<T> Node<T> {
     }
 
     /// Load the current strong count with the requested ordering.
-    pub fn strong(&self, order: Ordering) -> usize {
+    pub fn strong_count(&self, order: Ordering) -> usize {
         self.inner().strong.load(order)
     }
 
     /// Load the current weak count with the requested ordering.
-    pub fn weak(&self, order: Ordering) -> usize {
+    pub fn weak_count(&self, order: Ordering) -> usize {
         self.inner().weak.load(order)
     }
 
