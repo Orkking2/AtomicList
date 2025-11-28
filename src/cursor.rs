@@ -1,24 +1,21 @@
 //! Shared atomic cursors for coordinated traversal.
 
 use crate::{
-    atm_p::{CASErr, NonNullAtomicP},
-    sync::{Node, RawExt},
+    atm_p::{CASErr, NonNullAtomicNode, NonNullAtomicP},
+    sync::Node,
 };
 use std::{
-    borrow::Borrow, iter::Peekable, ops::Deref, sync::{Arc, atomic::Ordering}
+    ops::Deref,
+    sync::{Arc, atomic::Ordering},
 };
 
-/// Atomic cursor specialized for [`Node`]-backed rings.
+/// Shared iteration cursor backed by a [`Node<T>`]. This is the ergonomic entry
+/// point when you need to walk or coordinate around
+/// [`Node<T>`] values. For other pointer types, see the generic [`Cursor`].
 ///
-/// This is the ergonomic entry point when you need to walk or coordinate around
-/// [`Node<T>`] values. For other pointer types, see the generic [`CursorP`].
-pub type Cursor<T> = CursorP<T, Node<T>>;
-
-/// Shared iteration cursor backed by an atomic pointer.
-///
-/// Cloning a `CursorP` keeps both clones synchronized on the same atomically
+/// Cloning a `Cursor` keeps both clones synchronized on the same atomically
 /// stored pointer, so advancing in one thread updates the view in every other
-/// holder. This allows callers to build independent cursors that can be moved 
+/// holder. This allows callers to build independent cursors that can be moved
 /// in separate tasks while still coordinating which node each cursor refers to.
 ///
 /// ```
@@ -34,40 +31,44 @@ pub type Cursor<T> = CursorP<T, Node<T>>;
 /// assert_eq!(a.next().as_deref(), Some(&"tail"));
 /// assert_eq!(b.next().as_deref(), Some(&"tail"));
 /// ```
-///
-/// The `P` parameter lets advanced callers plug in alternative pointer types
-/// that implement [`RawExt<T>`], such as [`Arc`]/[`Weak`](std::sync::Weak), while retaining the shared
-/// cursor semantics.
-pub struct CursorP<T, P = Node<T>>
-where
-    P: RawExt<T>,
-{
-    atm_ptr: Arc<NonNullAtomicP<T, P>>,
-    current: P,
+pub struct Cursor<T> {
+    atm_ptr: Arc<NonNullAtomicNode<T>>,
+    current: Node<T>,
 }
 
-impl<T, P> CursorP<T, P>
-where
-    P: RawExt<T>,
-{
+impl<T> Cursor<T> {
     /// Start a shared cursor at `node`.
-    pub fn new(node: P) -> Self
-    where
-        P: Clone,
-    {
+    pub fn new(node: Node<T>) -> Self {
         Self {
             current: node.clone(),
             atm_ptr: Arc::new(NonNullAtomicP::new(node)),
         }
     }
 
-    /// Get access to the underlying P that we are currently on.
-    pub fn get_p(this: &Self) -> &P {
+    /// Update current to what is most currently stored in the atomic pointer.
+    ///
+    /// This lets a cursor that has been idle catch up to a sibling that already
+    /// advanced the shared position.
+    pub fn reload(&mut self) -> &Self {
+        self.current = self.atm_ptr.load(Ordering::Relaxed);
+        self
+    }
+
+    /// Inspect the next reachable node without advancing the shared cursor.
+    ///
+    /// This resolves through weak breadcrumbs just like [`Iterator::next`],
+    /// but leaves the shared atomic pointer untouched.
+    pub fn peek(&self) -> Option<Node<T>> {
+        self.current.resolve_next()
+    }
+
+    /// Get access to the underlying node the cursor currently references.
+    pub fn get_current(this: &Self) -> &Node<T> {
         &this.current
     }
 
     /// Try to reclaim the backing pointer when this is the last cursor.
-    pub fn into_p(this: Self) -> Option<P> {
+    pub fn into_current(this: Self) -> Option<Node<T>> {
         Arc::into_inner(this.atm_ptr).map(NonNullAtomicP::into_p)
     }
 
@@ -78,7 +79,7 @@ where
     ///
     /// If you are not interested in the potential Err(Self), use [`into_p`](Self::into_p)
     /// instead, as it optimizes for the guaranteed drop of self.
-    pub fn try_unwrap(this: Self) -> Result<P, Self> {
+    pub fn try_unwrap(this: Self) -> Result<Node<T>, Self> {
         let Self { atm_ptr, current } = this;
 
         Arc::try_unwrap(atm_ptr)
@@ -87,21 +88,15 @@ where
     }
 }
 
-impl<T, P> Deref for CursorP<T, P>
-where
-    P: RawExt<T> + Deref<Target = T>,
-{
-    type Target = T;
+impl<T> Deref for Cursor<T> {
+    type Target = Node<T>;
 
     fn deref(&self) -> &Self::Target {
-        &*self.current
+        &self.current
     }
 }
 
-impl<T, P> Clone for CursorP<T, P>
-where
-    P: RawExt<T> + Clone,
-{
+impl<T> Clone for Cursor<T> {
     fn clone(&self) -> Self {
         Self {
             atm_ptr: Arc::clone(&self.atm_ptr),
@@ -110,25 +105,13 @@ where
     }
 }
 
-impl<T, P> AsRef<T> for CursorP<T, P>
-where
-    P: RawExt<T> + AsRef<T>,
-{
+impl<T> AsRef<T> for Cursor<T> {
     fn as_ref(&self) -> &T {
         self.current.as_ref()
     }
 }
 
-impl<T, P> Borrow<T> for CursorP<T, P>
-where
-    P: RawExt<T> + Borrow<T>,
-{
-    fn borrow(&self) -> &T {
-        self.current.borrow()
-    }
-}
-
-impl<T> Iterator for CursorP<T, Node<T>> {
+impl<T> Iterator for Cursor<T> {
     type Item = Node<T>;
 
     /// Yield the next node while following any position published by sibling
@@ -141,7 +124,7 @@ impl<T> Iterator for CursorP<T, Node<T>> {
 
             // Nobody else has advanced the shared pointer yet.
             if Node::ptr_eq(&self.current, &loaded) {
-                let next = self.current.find_next_strong()?;
+                let next = self.current.resolve_next()?;
 
                 // Attempt to publish the successor. On success we hand that
                 // node out; on failure we yield the node installed by another
