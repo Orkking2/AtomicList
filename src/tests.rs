@@ -143,7 +143,7 @@ fn push_and_pop_race_leaves_singleton_ring() {
     assert!(values.iter().all(|v| *v != 0));
 
     assert!(Node::ptr_eq(&root.load_next_strong(), &root));
-    assert!(root.find_next_strong().is_none());
+    assert!(root.resolve_next().is_none());
 }
 
 #[test]
@@ -277,6 +277,6 @@ fn ownership_helpers_only_succeed_when_unique() {
 
     let cursor = Cursor::new(Node::new(25usize));
     let cursor_clone = cursor.clone();
-    assert!(Cursor::into_p(cursor).is_none());
-    assert_eq!(*Cursor::into_p(cursor_clone).unwrap(), 25);
+    assert!(Cursor::into_current(cursor).is_none());
+    assert_eq!(*Cursor::into_current(cursor_clone).unwrap(), 25);
 }
