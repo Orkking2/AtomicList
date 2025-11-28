@@ -788,7 +788,7 @@ impl<T> Node<T> {
     /// // Weak edge still points into the ring, so we can walk back to root.
     /// assert!(Node::ptr_eq(&removed.find_next_strong().unwrap(), &root));
     /// ```
-    pub fn find_next_strong(&self) -> Option<Self> {
+    pub fn resolve_next(&self) -> Option<Self> {
         if let Some(strong_next) = self.load_next_strong_unique() {
             Some(strong_next)
         } else {
@@ -969,7 +969,7 @@ impl<T> Iterator for NodeIter<T> {
     fn next(&mut self) -> Option<Self::Item> {
         let current = self.current.take()?;
 
-        self.current = current.find_next_strong();
+        self.current = current.resolve_next();
 
         self.current.clone()
     }
@@ -982,7 +982,7 @@ impl<T> Iterator for UniqueNodeIter<T> {
         let start = self.start.as_ref()?;
         let current = self.next.take()?;
 
-        let successor = current.find_next_strong();
+        let successor = current.resolve_next();
 
         self.next = successor.and_then(|next| {
             if Node::ptr_eq(&next, &start) {
