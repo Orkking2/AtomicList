@@ -86,6 +86,44 @@ impl<T> Cursor<T> {
             .map(NonNullAtomicP::into_p)
             .map_err(|atm_ptr| Self { atm_ptr, current })
     }
+
+    pub fn increment(this: &mut Self) -> bool {
+        loop {
+            // Acquire to observe any node another thread published.
+            let loaded = this.atm_ptr.load(Ordering::Acquire);
+
+            // Nobody else has advanced the shared pointer yet.
+            if Node::ptr_eq(&this.current, &loaded) {
+                // If we are unable to resolve a next, incrementing does not make sense.
+                if let Some(next) = this.current.resolve_next() {
+                    // Attempt to publish the successor. On success we hand that
+                    // node out; on failure we yield the node installed by another
+                    // thread to keep all holders in sync.
+                    match this.atm_ptr.compare_exchange(
+                        &this.current,
+                        next.clone(),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            this.current = next;
+                            break true;
+                        }
+                        Err(CASErr { actual, .. }) => {
+                            this.current = actual;
+                            break true;
+                        }
+                    }
+                } else {
+                    break false;
+                };
+            } else {
+                // Another thread moved the cursor; follow along.
+                this.current = loaded;
+                break true;
+            }
+        }
+    }
 }
 
 impl<T> Deref for Cursor<T> {
@@ -118,37 +156,10 @@ impl<T> Iterator for Cursor<T> {
     /// cursors. If another holder advances first, this cursor observes that
     /// move and aligns to the shared node before continuing traversal.
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            // Acquire to observe any node another thread published.
-            let loaded = self.atm_ptr.load(Ordering::Acquire);
-
-            // Nobody else has advanced the shared pointer yet.
-            if Node::ptr_eq(&self.current, &loaded) {
-                let next = self.current.resolve_next()?;
-
-                // Attempt to publish the successor. On success we hand that
-                // node out; on failure we yield the node installed by another
-                // thread to keep all holders in sync.
-                match self.atm_ptr.compare_exchange(
-                    &self.current,
-                    next.clone(),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        self.current = next.clone();
-                        return Some(next);
-                    }
-                    Err(CASErr { actual, .. }) => {
-                        self.current = actual.clone();
-                        return Some(actual);
-                    }
-                }
-            } else {
-                // Another thread moved the cursor; follow along.
-                self.current = loaded.clone();
-                return Some(loaded);
-            }
+        if Self::increment(self) {
+            Some(self.current.clone())
+        } else {
+            None
         }
     }
 }
