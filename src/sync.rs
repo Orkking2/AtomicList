@@ -379,20 +379,20 @@ impl<T> Node<T> {
     ///
     /// let root = Node::new("root");
     /// root.push_before("temp", |cur| *cur == "root").unwrap();
-///
-/// // Remove the node holding "temp".
-/// let removed = Node::pop_when(&root, |cur| *cur == "temp")
-///     .expect("found matching node");
-/// assert_eq!(*removed, "temp");
-///
-/// // The removed node now owns only a self-looping strong edge.
-/// assert!(Node::ptr_eq(&Node::load_next_strong(&removed), &removed));
-///
-/// // The ring closes back into a singleton, and weak navigation from the
-/// // removed node still finds the live list.
-/// assert!(Node::ptr_eq(&Node::load_next_strong(&root), &root));
-/// assert!(Node::ptr_eq(&Node::resolve_next(&removed).unwrap(), &root));
-/// ```
+    ///
+    /// // Remove the node holding "temp".
+    /// let removed = Node::pop_when(&root, |cur| *cur == "temp")
+    ///     .expect("found matching node");
+    /// assert_eq!(*removed, "temp");
+    ///
+    /// // The removed node now owns only a self-looping strong edge.
+    /// assert!(Node::ptr_eq(&Node::load_next_strong(&removed), &removed));
+    ///
+    /// // The ring closes back into a singleton, and weak navigation from the
+    /// // removed node still finds the live list.
+    /// assert!(Node::ptr_eq(&Node::load_next_strong(&root), &root));
+    /// assert!(Node::ptr_eq(&Node::resolve_next(&removed).unwrap(), &root));
+    /// ```
     pub fn pop_when<F: Fn(&T) -> bool>(this: &Self, predicate: F) -> Option<Self> {
         // Track the node whose successor we are inspecting; removing happens by
         // relinking that successor around the matching node.
@@ -456,17 +456,17 @@ impl<T> Node<T> {
     ///
     /// ```
     /// # use atomic_list::sync::Node;
-/// let root = Node::new("root");
-/// root.push_before("worker", |cur| *cur == "root").unwrap();
-///
-/// // Remove the root in-place without cloning it.
-/// let survivor = Node::remove(&root).expect("another node remains");
-/// assert_eq!(*survivor, "worker");
-///
-/// // `root` now has a self-looping strong edge but can still find the live ring.
-/// assert!(Node::ptr_eq(&Node::load_next_strong(&root), &root));
-/// assert!(Node::ptr_eq(&Node::resolve_next(&root).unwrap(), &survivor));
-/// ```
+    /// let root = Node::new("root");
+    /// root.push_before("worker", |cur| *cur == "root").unwrap();
+    ///
+    /// // Remove the root in-place without cloning it.
+    /// let survivor = Node::remove(&root).expect("another node remains");
+    /// assert_eq!(*survivor, "worker");
+    ///
+    /// // `root` now has a self-looping strong edge but can still find the live ring.
+    /// assert!(Node::ptr_eq(&Node::load_next_strong(&root), &root));
+    /// assert!(Node::ptr_eq(&Node::resolve_next(&root).unwrap(), &survivor));
+    /// ```
     pub fn remove(this: &Self) -> Option<Self> {
         // Fast path: singleton ring. Keep links self-referential.
         let successor = Self::load_next_strong(this);
@@ -954,6 +954,59 @@ impl<T> AsRef<T> for Node<T> {
 impl<T> Borrow<T> for Node<T> {
     fn borrow(&self) -> &T {
         self
+    }
+}
+
+impl<T> Node<T> {
+    /// Insert all items from `iter` before the first successor that satisfies `predicate`.
+    ///
+    /// Elements are inserted in iteration order; each successful insertion
+    /// starts its search from the previously inserted node to avoid reversing
+    /// the sequence when `predicate` always matches.
+    ///
+    /// Returns the items that could not be inserted (their predicates never
+    /// matched during traversal).
+    pub fn extend_using<I, F>(&mut self, iter: I, predicate: F) -> Vec<T>
+    where
+        I: IntoIterator<Item = T>,
+        F: Fn(&T) -> bool,
+    {
+        let mut tail = self.clone();
+        let mut failed = Vec::new();
+
+        for value in iter {
+            match tail.push_before(value, &predicate) {
+                Ok(()) => tail = Node::load_next_strong(&tail),
+                Err(v) => failed.push(v),
+            }
+        }
+
+        failed
+    }
+
+    /// Insert items paired with their own predicate, returning any that failed to insert.
+    pub fn extend_with_predicates<I, F>(&mut self, iter: I) -> Vec<(T, F)>
+    where
+        I: IntoIterator<Item = (T, F)>,
+        F: Fn(&T) -> bool,
+    {
+        let mut tail = self.clone();
+        let mut failed = Vec::new();
+
+        for (value, predicate) in iter {
+            match tail.push_before(value, &predicate) {
+                Ok(()) => tail = Node::load_next_strong(&tail),
+                Err(v) => failed.push((v, predicate)),
+            }
+        }
+
+        failed
+    }
+}
+
+impl<T> Extend<T> for Node<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let _ = self.extend_using(iter, |_| true);
     }
 }
 
