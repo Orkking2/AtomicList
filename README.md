@@ -10,9 +10,9 @@ schemes.
 
 ## Current surface area
 - `Node<T>` / `WeakNode<T>`: Arc/Weak-like handles with embedded successor edges.
-- Lock-free splice helpers: `push_before`, `pop_when`, and `remove_self` rearrange
+- Lock-free splice helpers: `push_before`, `pop_when`, and `remove` rearrange
   a ring while maintaining the self-loop invariants on detached nodes.
-- Successor introspection: `load_next_*` plus `find_next_strong` follow weak
+- Successor introspection: `load_next_*` plus `resolve_next` follow weak
   breadcrumbs after a node has been popped out.
 - Shared traversal: `cursor::Cursor` is an atomic cursor that multiple holders
   advance together.
@@ -29,19 +29,20 @@ root.push_before("worker-1", |cur| *cur == "root").unwrap();
 root.push_before("worker-2", |_| true).unwrap();
 
 // Remove the first node whose payload ends with "1".
-let removed = root.pop_when(|cur| cur.ends_with('1')).unwrap();
+let removed = Node::pop_when(&root, |cur| cur.ends_with('1')).unwrap();
 assert_eq!(*removed, "worker-1");
 
 // The ring closes back over the gap.
-assert_eq!(root.load_next_strong().to_string(), "worker-2");
+let worker_2 = Node::load_next_strong(&root);
+assert_eq!(worker_2.to_string(), "worker-2");
 assert!(Node::ptr_eq(
-    &root.load_next_strong().load_next_strong(),
+    &Node::load_next_strong(&worker_2),
     &root
 ));
 
 // Detached nodes keep a weak breadcrumb into the live ring.
 assert_eq!(
-    removed.find_next_strong().unwrap().to_string(),
+    Node::resolve_next(&removed).unwrap().to_string(),
     "root"
 );
 assert_eq!(Node::into_inner(removed), Some("worker-1"));

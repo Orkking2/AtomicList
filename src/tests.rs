@@ -114,7 +114,7 @@ fn push_and_pop_race_leaves_singleton_ring() {
                     break;
                 }
 
-                if let Some(node) = root.pop_when(|cur| *cur != 0) {
+                if let Some(node) = Node::pop_when(&root, |cur| *cur != 0) {
                     popped_values.lock().unwrap().push(node);
                     remaining.fetch_sub(1, Ordering::AcqRel);
                 } else {
@@ -130,7 +130,7 @@ fn push_and_pop_race_leaves_singleton_ring() {
         handle.join().unwrap();
     }
 
-    while let Some(node) = root.pop_when(|cur| *cur != 0) {
+    while let Some(node) = Node::pop_when(&root, |cur| *cur != 0) {
         popped_values.lock().unwrap().push(node);
     }
 
@@ -142,8 +142,8 @@ fn push_and_pop_race_leaves_singleton_ring() {
     assert!(popped.len() <= initial + push_total);
     assert!(values.iter().all(|v| *v != 0));
 
-    assert!(Node::ptr_eq(&root.load_next_strong(), &root));
-    assert!(root.resolve_next().is_none());
+    assert!(Node::ptr_eq(&Node::load_next_strong(&root), &root));
+    assert!(Node::resolve_next(&root).is_none());
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn independent_rings_handle_concurrent_work() {
             let mut popped = 0;
             let mut attempts = 0;
             while popped < initial + extra && attempts < (initial + extra) * 20 {
-                if let Some(node) = ring_a.pop_when(|cur| *cur != 0) {
+                if let Some(node) = Node::pop_when(&ring_a, |cur| *cur != 0) {
                     popped += 1;
                     popped_a.lock().unwrap().push(node);
                 } else {
@@ -225,7 +225,7 @@ fn independent_rings_handle_concurrent_work() {
             let mut popped = 0;
             let mut attempts = 0;
             while popped < initial + extra && attempts < (initial + extra) * 20 {
-                if let Some(node) = ring_b.pop_when(|cur| *cur != 10_000) {
+                if let Some(node) = Node::pop_when(&ring_b, |cur| *cur != 10_000) {
                     popped += 1;
                     popped_b.lock().unwrap().push(node);
                 } else {
@@ -240,10 +240,10 @@ fn independent_rings_handle_concurrent_work() {
         handle.join().unwrap();
     }
 
-    while let Some(node) = ring_a.pop_when(|cur| *cur != 0) {
+    while let Some(node) = Node::pop_when(&ring_a, |cur| *cur != 0) {
         popped_a.lock().unwrap().push(node);
     }
-    while let Some(node) = ring_b.pop_when(|cur| *cur != 10_000) {
+    while let Some(node) = Node::pop_when(&ring_b, |cur| *cur != 10_000) {
         popped_b.lock().unwrap().push(node);
     }
 
@@ -261,8 +261,8 @@ fn independent_rings_handle_concurrent_work() {
     assert!(values_a.iter().all(|v| *v < 10_000));
     assert!(values_b.iter().all(|v| *v > 10_000));
 
-    assert!(Node::ptr_eq(&ring_a.load_next_strong(), &ring_a));
-    assert!(Node::ptr_eq(&ring_b.load_next_strong(), &ring_b));
+    assert!(Node::ptr_eq(&Node::load_next_strong(&ring_a), &ring_a));
+    assert!(Node::ptr_eq(&Node::load_next_strong(&ring_b), &ring_b));
 }
 
 #[test]

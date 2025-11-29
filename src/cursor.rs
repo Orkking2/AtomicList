@@ -59,7 +59,7 @@ impl<T> Cursor<T> {
     /// This resolves through weak breadcrumbs just like [`Iterator::next`],
     /// but leaves the shared atomic pointer untouched.
     pub fn peek(&self) -> Option<Node<T>> {
-        self.current.resolve_next()
+        Node::resolve_next(&self.current)
     }
 
     /// Get access to the underlying node the cursor currently references.
@@ -95,7 +95,7 @@ impl<T> Cursor<T> {
             // Nobody else has advanced the shared pointer yet.
             if Node::ptr_eq(&this.current, &loaded) {
                 // If we are unable to resolve a next, incrementing does not make sense.
-                if let Some(next) = this.current.resolve_next() {
+                if let Some(next) = Node::resolve_next(&this.current) {
                     // Attempt to publish the successor. On success we hand that
                     // node out; on failure we yield the node installed by another
                     // thread to keep all holders in sync.

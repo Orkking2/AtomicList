@@ -230,7 +230,7 @@ impl<T> Node<T> {
     /// let node = Node::new("root");
     /// assert_eq!(*node, "root");
     /// // The initial successor is the node itself.
-    /// assert!(Node::ptr_eq(&node, &node.load_next_strong()));
+    /// assert!(Node::ptr_eq(&node, &Node::load_next_strong(&node)));
     /// ```
     pub fn new(data: T) -> Self {
         let x = Box::new(NodeInner {
@@ -246,11 +246,11 @@ impl<T> Node<T> {
             ptr: Box::leak(x).into(),
         };
 
-        let Next { strong, weak } = this.next();
+        let Next { strong, weak } = Self::next(&this);
 
         // Here we guarantee the safety of NonNullAtomicP::null
         strong.store(this.clone(), Ordering::Relaxed);
-        weak.store(this.downgrade(), Ordering::Relaxed);
+        weak.store(Self::downgrade(&this), Ordering::Relaxed);
 
         this
     }
@@ -262,22 +262,24 @@ impl<T> Node<T> {
     /// or to a different allocation. If it points to self, then we are a valid
     /// list, but if it points to someone else, then they are the list and we
     /// are a popped (free) node.
-    /// 
+    ///
     /// Ownership mechanics are arbitrary tbh.
-    pub fn into_new_ring(self) -> Self {
-        drop(self.remove_self());
+    pub fn into_new_ring(this: Self) -> Self {
+        drop(Self::remove(&this));
 
-        self.next().weak.store(self.downgrade(), Ordering::Release);
-        self
+        Self::next(&this)
+            .weak
+            .store(Self::downgrade(&this), Ordering::Release);
+        this
     }
 
     /// As mentioned in [`into_new_ring`](Self::into_new_ring), the indication
     /// of whether we are a free node or part of a list is whether out weak_next
     /// points to ourselves or to another node, given of course that our strong
     /// already points to self.
-    pub fn is_list(&self) -> bool {
-        Self::ptr_eq(&self.next().strong.load(Ordering::Acquire), self)
-            && self.weak_ptr_eq(&self.next().weak.load(Ordering::Acquire))
+    pub fn is_list(this: &Self) -> bool {
+        Self::ptr_eq(&Self::next(this).strong.load(Ordering::Acquire), this)
+            && Self::weak_ptr_eq(this, &Self::next(this).weak.load(Ordering::Acquire))
     }
 
     /// Insert `elem` before the first successor that satisfies `predicate`.
@@ -296,11 +298,9 @@ impl<T> Node<T> {
     ///     .expect("insert before root");
     ///
     /// // The ring now goes: root -> worker-1 -> root.
-    /// assert_eq!(*root.load_next_strong(), "worker-1");
-    /// assert!(Node::ptr_eq(
-    ///     &root.load_next_strong().load_next_strong(),
-    ///     &root
-    /// ));
+    /// let worker = Node::load_next_strong(&root);
+    /// assert_eq!(*worker, "worker-1");
+    /// assert!(Node::ptr_eq(&Node::load_next_strong(&worker), &root));
     /// ```
     ///
     /// Treats self as a root into the atomic list of which this node is a node
@@ -312,12 +312,12 @@ impl<T> Node<T> {
         let mut current = self.clone();
 
         loop {
-            let next = current.load_next_strong();
+            let next = Self::load_next_strong(&current);
 
             if predicate(&next) {
                 // Pre-link the new node so that, if the CAS succeeds, the ring is valid in
                 // a single atomic write to `current.next`.
-                let Next { strong, weak: _ } = new_node.next();
+                let Next { strong, weak: _ } = Self::next(&new_node);
 
                 strong.store(next.clone(), Ordering::Release);
 
@@ -329,13 +329,13 @@ impl<T> Node<T> {
                 // The thought process goes: as long as we have a strong edge our weak
                 // edge is completely irrelevant. So modifications must only happen to
                 // our weak edge when (a) we are creating a new list, see `into_new_ring`
-                // or (b) we are modifying our strong edge, see `pop_when`. 
+                // or (b) we are modifying our strong edge, see `pop_when`.
                 // weak.store(next.downgrade(), Ordering::Release);
 
                 // Attempt to install the new node as `current.next`. If another thread
                 // changed the pointer in the meantime, restart with the observed successor
                 // so we keep following the live ring.
-                match current.next().strong.compare_exchange(
+                match Self::next(&current).strong.compare_exchange(
                     &next,
                     new_node.clone(),
                     Ordering::AcqRel,
@@ -369,7 +369,7 @@ impl<T> Node<T> {
     ///
     /// On removal, the returned node's **strong** `next` is reset to refer to
     /// itself, so it no longer keeps the list alive. Its **weak** `next`
-    /// continues to point into the list so `find_next_strong` can still locate
+    /// continues to point into the list so `resolve_next` can still locate
     /// the current successor if the node is reinserted later.
     ///
     /// Returns `None` if a full lap completes without finding a match.
@@ -379,38 +379,37 @@ impl<T> Node<T> {
     ///
     /// let root = Node::new("root");
     /// root.push_before("temp", |cur| *cur == "root").unwrap();
-    ///
-    /// // Remove the node holding "temp".
-    /// let removed = root
-    ///     .pop_when(|cur| *cur == "temp")
-    ///     .expect("found matching node");
-    /// assert_eq!(*removed, "temp");
-    ///
-    /// // The removed node now owns only a self-looping strong edge.
-    /// assert!(Node::ptr_eq(&removed.load_next_strong(), &removed));
-    ///
-    /// // The ring closes back into a singleton, and weak navigation from the
-    /// // removed node still finds the live list.
-    /// assert!(Node::ptr_eq(&root.load_next_strong(), &root));
-    /// assert!(Node::ptr_eq(&removed.find_next_strong().unwrap(), &root));
-    /// ```
-    pub fn pop_when<F: Fn(&T) -> bool>(&self, predicate: F) -> Option<Self> {
+///
+/// // Remove the node holding "temp".
+/// let removed = Node::pop_when(&root, |cur| *cur == "temp")
+///     .expect("found matching node");
+/// assert_eq!(*removed, "temp");
+///
+/// // The removed node now owns only a self-looping strong edge.
+/// assert!(Node::ptr_eq(&Node::load_next_strong(&removed), &removed));
+///
+/// // The ring closes back into a singleton, and weak navigation from the
+/// // removed node still finds the live list.
+/// assert!(Node::ptr_eq(&Node::load_next_strong(&root), &root));
+/// assert!(Node::ptr_eq(&Node::resolve_next(&removed).unwrap(), &root));
+/// ```
+    pub fn pop_when<F: Fn(&T) -> bool>(this: &Self, predicate: F) -> Option<Self> {
         // Track the node whose successor we are inspecting; removing happens by
         // relinking that successor around the matching node.
-        let mut current = self.clone();
+        let mut current = this.clone();
 
         loop {
-            let next = current.load_next_strong();
+            let next = Self::load_next_strong(&current);
 
             if predicate(&next) {
                 // Capture `next`'s successor up front so a successful CAS can bypass
                 // `next` in one step.
-                let new_next = next.load_next_strong();
+                let new_next = Self::load_next_strong(&next);
 
                 // Try to swing `current.next` from `next` to `new_next`. A failure means
                 // the list changed underneath us, so follow the observed successor and
                 // continue searching.
-                match current.next().strong.compare_exchange(
+                match Self::next(&current).strong.compare_exchange(
                     &next,
                     new_next.clone(),
                     Ordering::AcqRel,
@@ -419,17 +418,16 @@ impl<T> Node<T> {
                     Ok(old) => {
                         // Detach the removed node's strong edge so it no longer owns the
                         // list, but keep a weak edge so it can still find the live ring.
-                        old.next()
-                            .weak
-                            .store(new_next.downgrade(), Ordering::Release);
-                        old.next().strong.store(old.clone(), Ordering::Release);
+                        let Next { strong, weak } = Self::next(&old);
+                        weak.store(Self::downgrade(&new_next), Ordering::Release);
+                        strong.store(old.clone(), Ordering::Release);
 
                         break Some(old);
                     }
                     Err(CASErr {
                         // This is the actual next of current as of this moment.
                         actual: next,
-                        new: _
+                        new: _,
                     }) => {
                         current = next;
                     }
@@ -437,7 +435,7 @@ impl<T> Node<T> {
             }
 
             // Completed a full traversal without a match.
-            if Node::ptr_eq(self, &current) {
+            if Node::ptr_eq(this, &current) {
                 break None;
             }
         }
@@ -453,40 +451,42 @@ impl<T> Node<T> {
     /// After a successful removal:
     /// - `self.next().strong` is reset to a self-loop so this node no longer
     ///   holds an owning reference to the ring.
-    /// - `self.next().weak` still points into the ring so `find_next_strong`
-    ///   can recover a reference to the original ring.
+    /// - `self.next().weak` still points into the ring so `resolve_next` can
+    ///   recover a reference to the original ring.
     ///
     /// ```
     /// # use atomic_list::sync::Node;
-    /// let root = Node::new("root");
-    /// root.push_before("worker", |cur| *cur == "root").unwrap();
-    ///
-    /// // Remove the root in-place without cloning it.
-    /// let survivor = root.remove_self().expect("another node remains");
-    /// assert_eq!(*survivor, "worker");
-    ///
-    /// // `root` now has a self-looping strong edge but can still find the live ring.
-    /// assert!(Node::ptr_eq(&root.load_next_strong(), &root));
-    /// assert!(Node::ptr_eq(&root.find_next_strong().unwrap(), &survivor));
-    /// ```
-    pub fn remove_self(&self) -> Option<Self> {
+/// let root = Node::new("root");
+/// root.push_before("worker", |cur| *cur == "root").unwrap();
+///
+/// // Remove the root in-place without cloning it.
+/// let survivor = Node::remove(&root).expect("another node remains");
+/// assert_eq!(*survivor, "worker");
+///
+/// // `root` now has a self-looping strong edge but can still find the live ring.
+/// assert!(Node::ptr_eq(&Node::load_next_strong(&root), &root));
+/// assert!(Node::ptr_eq(&Node::resolve_next(&root).unwrap(), &survivor));
+/// ```
+    pub fn remove(this: &Self) -> Option<Self> {
         // Fast path: singleton ring. Keep links self-referential.
-        let successor = self.load_next_strong();
-        if Node::ptr_eq(self, &successor) {
-            self.next().weak.store(self.downgrade(), Ordering::Release);
-            self.next().strong.store(successor, Ordering::Release);
+        let successor = Self::load_next_strong(this);
+        if Node::ptr_eq(this, &successor) {
+            Self::next(this)
+                .weak
+                .store(Self::downgrade(this), Ordering::Release);
+            Self::next(this).strong.store(successor, Ordering::Release);
             return None;
         }
 
         // Search for a predecessor whose next points to `self`.
         let mut pred = successor.clone();
         loop {
-            let next = pred.load_next_strong();
+            let next = Self::load_next_strong(&pred);
 
-            if Node::ptr_eq(&next, self) {
+            if Node::ptr_eq(&next, this) {
                 let new_next = successor.clone();
 
-                match pred.next().strong.compare_exchange(
+                match Self::next(&pred).strong.compare_exchange(
                     &next,
                     new_next.clone(),
                     Ordering::AcqRel,
@@ -494,10 +494,9 @@ impl<T> Node<T> {
                 ) {
                     Ok(_) => {
                         // Detach self's ownership of the ring but keep a weak breadcrumb.
-                        self.next()
-                            .weak
-                            .store(new_next.downgrade(), Ordering::Release);
-                        self.next().strong.store(self.clone(), Ordering::Release);
+                        let Next { strong, weak } = Self::next(this);
+                        weak.store(Self::downgrade(&new_next), Ordering::Release);
+                        strong.store(this.clone(), Ordering::Release);
 
                         return Some(new_next);
                     }
@@ -511,7 +510,7 @@ impl<T> Node<T> {
             pred = next;
 
             // If we looped the ring without finding a stable predecessor, abort.
-            if Node::ptr_eq(&pred, self) {
+            if Node::ptr_eq(&pred, this) {
                 return None;
             }
         }
@@ -556,7 +555,7 @@ impl<T> Node<T> {
                 Some(elem)
             }
             2 => {
-                let next = this.next().strong.load_noclone(Ordering::Acquire);
+                let next = Self::next(&this).strong.load_noclone(Ordering::Acquire);
 
                 if next
                     .inner()
@@ -575,7 +574,9 @@ impl<T> Node<T> {
                     return None;
                 }
 
-                return Self::into_inner(unsafe { this.next().strong.take(Ordering::Relaxed) });
+                return Self::into_inner(unsafe {
+                    Self::next(&this).strong.take(Ordering::Relaxed)
+                });
             }
             _ => None,
         }
@@ -616,7 +617,7 @@ impl<T> Node<T> {
                     return Err(this);
                 }
 
-                let next = this.next().strong.load_noclone(Ordering::Acquire);
+                let next = Self::next(&this).strong.load_noclone(Ordering::Acquire);
 
                 if !Self::ptr_eq(&next, &this) {
                     return Err(this);
@@ -626,7 +627,7 @@ impl<T> Node<T> {
 
                 this.inner().strong.fetch_sub(1, Ordering::Release);
 
-                let next_self = unsafe { this.next().strong.take(Ordering::Relaxed) };
+                let next_self = unsafe { Self::next(&this).strong.take(Ordering::Relaxed) };
 
                 match Self::try_unwrap(next_self) {
                     Ok(value) => Ok(value),
@@ -660,18 +661,18 @@ impl<T> Node<T> {
     }
 
     /// Load the current strong count with the requested ordering.
-    pub fn strong_count(&self, order: Ordering) -> usize {
-        self.inner().strong.load(order)
+    pub fn strong_count(this: &Self) -> usize {
+        this.inner().strong.load(Ordering::Relaxed)
     }
 
     /// Load the current weak count with the requested ordering.
-    pub fn weak_count(&self, order: Ordering) -> usize {
-        self.inner().weak.load(order)
+    pub fn weak_count(this: &Self) -> usize {
+        this.inner().weak.load(Ordering::Relaxed)
     }
 
     /// Borrow the strong/weak successor slots.
-    pub fn next(&self) -> Next<'_, NonNullAtomicNode<T>, NonNullAtomicWeakNode<T>> {
-        let inner = self.inner();
+    pub fn next(this: &Self) -> Next<'_, NonNullAtomicNode<T>, NonNullAtomicWeakNode<T>> {
+        let inner = this.inner();
 
         Next {
             strong: &inner.next,
@@ -689,26 +690,27 @@ impl<T> Node<T> {
     /// drop(node);
     /// assert!(weak.upgrade().is_none());
     /// ```
-    pub fn downgrade(&self) -> WeakNode<T> {
-        let mut cur = self.inner().weak.load(Ordering::Relaxed);
+    pub fn downgrade(this: &Self) -> WeakNode<T> {
+        let inner = this.inner();
+        let mut cur = inner.weak.load(Ordering::Relaxed);
 
         loop {
             if cur == usize::MAX {
                 hint::spin_loop();
-                cur = self.inner().weak.load(Ordering::Relaxed);
+                cur = inner.weak.load(Ordering::Relaxed);
                 continue;
             }
 
             assert!(cur <= MAX_REFCOUNT, "{}", INTERNAL_OVERFLOW_ERROR);
 
-            match self.inner().weak.compare_exchange_weak(
+            match inner.weak.compare_exchange_weak(
                 cur,
                 cur + 1,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    return WeakNode { ptr: self.ptr };
+                    return WeakNode { ptr: this.ptr };
                 }
                 Err(old) => cur = old,
             }
@@ -725,10 +727,10 @@ impl<T> Node<T> {
     /// # use atomic_list::sync::Node;
     /// let root = Node::new(1);
     /// root.push_before(2, |cur| *cur == 1).unwrap();
-    /// assert_eq!(*root.load_next_strong(), 2);
+    /// assert_eq!(*Node::load_next_strong(&root), 2);
     /// ```
-    pub fn load_next_strong(&self) -> Self {
-        self.next().strong.load(Ordering::Acquire)
+    pub fn load_next_strong(this: &Self) -> Self {
+        Self::next(this).strong.load(Ordering::Acquire)
     }
 
     /// Load the strong successor, returning `None` when the edge is a self-loop.
@@ -741,15 +743,20 @@ impl<T> Node<T> {
     /// let root = Node::new("root");
     ///
     /// // A singleton ring has no unique successor.
-    /// assert!(root.load_next_strong_unique().is_none());
+    /// assert!(Node::load_next_strong_unique(&root).is_none());
     ///
     /// root.push_before("next", |cur| *cur == "root").unwrap();
-    /// assert_eq!(root.load_next_strong_unique().unwrap().to_string(), "next");
+    /// assert_eq!(
+    ///     Node::load_next_strong_unique(&root)
+    ///         .unwrap()
+    ///         .to_string(),
+    ///     "next"
+    /// );
     /// ```
-    pub fn load_next_strong_unique(&self) -> Option<Self> {
-        let next = self.load_next_strong();
+    pub fn load_next_strong_unique(this: &Self) -> Option<Self> {
+        let next = Self::load_next_strong(this);
 
-        if Self::ptr_eq(self, &next) {
+        if Self::ptr_eq(this, &next) {
             None
         } else {
             Some(next)
@@ -757,15 +764,15 @@ impl<T> Node<T> {
     }
 
     /// Load the weak successor of this node.
-    pub fn load_next_weak(&self) -> WeakNode<T> {
-        self.next().weak.load(Ordering::Acquire)
+    pub fn load_next_weak(this: &Self) -> WeakNode<T> {
+        Self::next(this).weak.load(Ordering::Acquire)
     }
 
     /// Load the weak successor, returning `None` when the edge is a self-loop.
-    pub fn load_next_weak_unique(&self) -> Option<WeakNode<T>> {
-        let next = self.load_next_weak();
+    pub fn load_next_weak_unique(this: &Self) -> Option<WeakNode<T>> {
+        let next = Self::load_next_weak(this);
 
-        if self.weak_ptr_eq(&next) {
+        if Self::weak_ptr_eq(this, &next) {
             None
         } else {
             Some(next)
@@ -783,16 +790,16 @@ impl<T> Node<T> {
     /// let root = Node::new("root");
     /// root.push_before("temp", |cur| *cur == "root").unwrap();
     ///
-    /// let removed = root.pop_when(|cur| *cur == "temp").unwrap();
-    /// assert!(Node::ptr_eq(&removed.load_next_strong(), &removed));
+    /// let removed = Node::pop_when(&root, |cur| *cur == "temp").unwrap();
+    /// assert!(Node::ptr_eq(&Node::load_next_strong(&removed), &removed));
     /// // Weak edge still points into the ring, so we can walk back to root.
-    /// assert!(Node::ptr_eq(&removed.find_next_strong().unwrap(), &root));
+    /// assert!(Node::ptr_eq(&Node::resolve_next(&removed).unwrap(), &root));
     /// ```
-    pub fn resolve_next(&self) -> Option<Self> {
-        if let Some(strong_next) = self.load_next_strong_unique() {
+    pub fn resolve_next(this: &Self) -> Option<Self> {
+        if let Some(strong_next) = Self::load_next_strong_unique(this) {
             Some(strong_next)
         } else {
-            if let Some(weak_next) = self.load_next_weak_unique() {
+            if let Some(weak_next) = Self::load_next_weak_unique(this) {
                 if let Some(strong_next) = weak_next.upgrade() {
                     Some(strong_next)
                 } else {
@@ -807,7 +814,7 @@ impl<T> Node<T> {
     /// Create a local iterator that walks this ring once starting at `self`.
     ///
     /// The iterator yields `self` first, then advances successors using
-    /// [`find_next_strong`](Self::find_next_strong). Iteration ends after a
+    /// [`resolve_next`](Self::resolve_next). Iteration ends after a
     /// full lap or if traversal cannot find another strong node (for example,
     /// when the node has been detached).
     ///
@@ -854,11 +861,11 @@ impl<T> Node<T> {
     /// ```
     /// # use atomic_list::sync::Node;
     /// let node = Node::new(10);
-    /// let weak = node.downgrade();
-    /// assert!(node.weak_ptr_eq(&weak));
+    /// let weak = Node::downgrade(&node);
+    /// assert!(Node::weak_ptr_eq(&node, &weak));
     /// ```
-    pub fn weak_ptr_eq(&self, rhs: &WeakNode<T>) -> bool {
-        ptr::addr_eq(Node::as_ptr(self), WeakNode::as_ptr(rhs))
+    pub fn weak_ptr_eq(lhs: &Self, rhs: &WeakNode<T>) -> bool {
+        ptr::addr_eq(Node::as_ptr(lhs), WeakNode::as_ptr(rhs))
     }
 }
 
@@ -969,7 +976,7 @@ impl<T> Iterator for NodeIter<T> {
     fn next(&mut self) -> Option<Self::Item> {
         let current = self.current.take()?;
 
-        self.current = current.resolve_next();
+        self.current = Node::resolve_next(&current);
 
         self.current.clone()
     }
@@ -982,7 +989,7 @@ impl<T> Iterator for UniqueNodeIter<T> {
         let start = self.start.as_ref()?;
         let current = self.next.take()?;
 
-        let successor = current.resolve_next();
+        let successor = Node::resolve_next(&current);
 
         self.next = successor.and_then(|next| {
             if Node::ptr_eq(&next, &start) {
@@ -1016,7 +1023,7 @@ impl<T> Drop for Node<T> {
             // There is 1 other reference to self out there.
             // We need to make sure that reference is not ourselves.
             2 => {
-                let next = self.next().strong.load_noclone(Ordering::Acquire);
+                let next = Self::next(self).strong.load_noclone(Ordering::Acquire);
 
                 // If we are at any point able to CAS 1 with 0 then we guarantee that we are the only strong reference.
                 // No upgrades can happen with strong == 0, and no clones can happen without breaking &mut self.
@@ -1032,7 +1039,7 @@ impl<T> Drop for Node<T> {
                         next.inner().strong.store(1, Ordering::Release);
                         // We have confirmed that it is our own strong next that is our only strong reference left.
                         // This will drop self where self.next.strong.load() == None
-                        unsafe { drop(self.next().strong.take(Ordering::Relaxed)) }
+                        unsafe { drop(Self::next(self).strong.take(Ordering::Relaxed)) }
                     } else {
                         // We mistakenly consumed the last strong reference to next which is not self
                         next.inner().strong.store(1, Ordering::Release);
