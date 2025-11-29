@@ -195,7 +195,7 @@ pub struct Node<T> {
 /// Local iterator that walks a ring once, starting from a given node.
 ///
 /// Each call to [`Iterator::next`] yields the current node and advances to its
-/// successor via [`Node::find_next_strong`]. Iteration stops after the iterator
+/// successor via [`Node::resolve_next`]. Iteration stops after the iterator
 /// would wrap back to the starting node or if the traversal falls off the ring
 /// (e.g., the nodes were detached).
 pub struct UniqueNodeIter<T> {
