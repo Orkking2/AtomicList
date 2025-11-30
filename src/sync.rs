@@ -824,11 +824,11 @@ impl<T> Node<T> {
     /// root.push_before("worker-1", |cur| *cur == "root").unwrap();
     /// root.push_before("worker-2", |_| true).unwrap();
     ///
-    /// let seen: Vec<_> = root.unique_iter_from().map(|n| n.to_string()).collect();
+    /// let seen: Vec<_> = root.unique_iter().map(|n| n.to_string()).collect();
     /// assert_eq!(seen.len(), 3);
     /// assert!(seen.contains(&"root".to_string()));
     /// ```
-    pub fn unique_iter_from(&self) -> UniqueNodeIter<T> {
+    pub fn unique_iter(&self) -> UniqueNodeIter<T> {
         UniqueNodeIter {
             start: Some(self.clone()),
             next: Some(self.clone()),

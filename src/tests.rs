@@ -28,7 +28,7 @@ fn extend_preserves_order() {
     let mut root = Node::new(0usize);
     root.extend([1usize, 2, 3]);
 
-    let values: Vec<_> = root.unique_iter_from().map(|node| *node).collect();
+    let values: Vec<_> = root.unique_iter().map(|node| *node).collect();
     assert_eq!(values, vec![0, 1, 2, 3]);
 }
 
@@ -39,7 +39,7 @@ fn extend_splices_before_existing_successor() {
 
     root.extend([1usize, 2]);
 
-    let values: Vec<_> = root.unique_iter_from().map(|node| *node).collect();
+    let values: Vec<_> = root.unique_iter().map(|node| *node).collect();
     assert_eq!(values, vec![0, 1, 2, 99]);
 }
 
@@ -51,7 +51,7 @@ fn extend_using_applies_predicate() {
     let failed = root.extend_using([1usize, 2], |cur| *cur == 99);
 
     assert!(failed.is_empty());
-    let values: Vec<_> = root.unique_iter_from().map(|node| *node).collect();
+    let values: Vec<_> = root.unique_iter().map(|node| *node).collect();
     assert_eq!(values, vec![0, 1, 2, 99]);
 }
 
@@ -64,7 +64,7 @@ fn extend_tuple_uses_per_item_predicate() {
     let failed = root.extend_with_predicates(vec![(1usize, before_99), (2usize, before_99)]);
 
     assert!(failed.is_empty());
-    let values: Vec<_> = root.unique_iter_from().map(|node| *node).collect();
+    let values: Vec<_> = root.unique_iter().map(|node| *node).collect();
     assert_eq!(values, vec![0, 1, 2, 99]);
 }
 
@@ -75,7 +75,7 @@ fn extend_using_returns_failures() {
     let failed = root.extend_using([1usize, 2], |cur| *cur == 99);
 
     assert_eq!(failed, vec![1, 2]);
-    let values: Vec<_> = root.unique_iter_from().map(|node| *node).collect();
+    let values: Vec<_> = root.unique_iter().map(|node| *node).collect();
     assert_eq!(values, vec![0]);
 }
 
@@ -89,7 +89,7 @@ fn extend_with_predicates_returns_failures() {
     assert_eq!(failed.len(), 2);
     assert_eq!(failed[0].0, 1);
     assert_eq!(failed[1].0, 2);
-    let values: Vec<_> = root.unique_iter_from().map(|node| *node).collect();
+    let values: Vec<_> = root.unique_iter().map(|node| *node).collect();
     assert_eq!(values, vec![0]);
 }
 
@@ -122,7 +122,7 @@ fn concurrent_push_before_keeps_all_nodes() {
     }
 
     let mut seen = HashSet::new();
-    for node in root.unique_iter_from() {
+    for node in root.unique_iter() {
         seen.insert(*node);
     }
 
