@@ -149,17 +149,17 @@ impl<T> AsRef<T> for Cursor<T> {
     }
 }
 
-impl<T> Iterator for Cursor<T> {
-    type Item = Node<T>;
+// impl<T> Iterator for Cursor<T> {
+//     type Item = Node<T>;
 
-    /// Yield the next node while following any position published by sibling
-    /// cursors. If another holder advances first, this cursor observes that
-    /// move and aligns to the shared node before continuing traversal.
-    fn next(&mut self) -> Option<Self::Item> {
-        if Self::increment(self) {
-            Some(self.current.clone())
-        } else {
-            None
-        }
-    }
-}
+//     /// Yield the next node while following any position published by sibling
+//     /// cursors. If another holder advances first, this cursor observes that
+//     /// move and aligns to the shared node before continuing traversal.
+//     fn next(&mut self) -> Option<Self::Item> {
+//         if Self::increment(self) {
+//             Some(self.current.clone())
+//         } else {
+//             None
+//         }
+//     }
+// }
