@@ -799,14 +799,12 @@ impl<T> Node<T> {
         if let Some(strong_next) = Self::load_next_strong_unique(this) {
             Some(strong_next)
         } else {
-            if let Some(weak_next) = Self::load_next_weak_unique(this) {
-                if let Some(strong_next) = weak_next.upgrade() {
-                    Some(strong_next)
-                } else {
-                    weak_next.find_next_strong()
-                }
+            let weak_next = Self::load_next_weak(this);
+
+            if let Some(strong_next) = weak_next.upgrade() {
+                Some(strong_next)
             } else {
-                None
+                weak_next.find_next_strong()
             }
         }
     }
