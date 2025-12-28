@@ -22,6 +22,7 @@
 
 use crate::sync::{Node, RawExt, WeakNode};
 use std::{
+    fmt::Debug,
     marker::PhantomData,
     mem::ManuallyDrop,
     ptr,
@@ -53,6 +54,14 @@ pub type NonNullAtomicWeakNode<T> = NonNullAtomicP<T, WeakNode<T>>;
 #[derive(Clone)]
 pub struct NonNullAtomicP<T, P: RawExt<T>> {
     inner: AtomicP<T, P>,
+}
+
+impl<T, P: RawExt<T>> Debug for NonNullAtomicP<T, P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NonNullAtomicP")
+            .field("inner", &self.inner)
+            .finish()
+    }
 }
 
 impl<T, P: Clone + RawExt<T>> TryFrom<AtomicP<T, P>> for NonNullAtomicP<T, P> {
@@ -92,7 +101,7 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
     }
 
     /// Get a reference to the inner AtomicP. Generally
-    /// this is not necessary, but is exposed for 
+    /// this is not necessary, but is exposed for
     /// convenience.
     pub fn as_atomic_p(&self) -> &AtomicP<T, P> {
         &self.inner
@@ -171,6 +180,12 @@ impl<T, P: RawExt<T>> NonNullAtomicP<T, P> {
 pub struct AtomicP<T, P: RawExt<T>> {
     ptr: AtomicPtr<T>,
     _marker: PhantomData<P>,
+}
+
+impl<T, P: RawExt<T>> Debug for AtomicP<T, P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AtomicP").field("ptr", &self.ptr).finish()
+    }
 }
 
 impl<T, P: RawExt<T>> AtomicP<T, P> {

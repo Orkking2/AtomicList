@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{
     borrow::Borrow,
-    fmt,
+    fmt::{self, Debug},
     hash::{Hash, Hasher},
     hint,
     mem::{ManuallyDrop, offset_of},
@@ -190,6 +190,12 @@ struct NodeInner<T> {
 /// its next and weak_next will point to the same `next`.
 pub struct Node<T> {
     ptr: NonNull<NodeInner<T>>,
+}
+
+impl<T> Debug for Node<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node").field("ptr", &self.ptr).finish()
+    }
 }
 
 /// Local iterator that walks a ring once, starting from a given node.
@@ -918,11 +924,11 @@ impl<T: fmt::Display> fmt::Display for Node<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Node<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&**self, f)
-    }
-}
+// impl<T: fmt::Debug> fmt::Debug for Node<T> {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         fmt::Debug::fmt(&**self, f)
+//     }
+// }
 
 impl<T> fmt::Pointer for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

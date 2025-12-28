@@ -5,6 +5,7 @@ use crate::{
     sync::Node,
 };
 use std::{
+    fmt::Debug,
     ops::Deref,
     sync::{Arc, atomic::Ordering},
 };
@@ -34,6 +35,15 @@ use std::{
 pub struct Cursor<T> {
     atm_ptr: Arc<NonNullAtomicNode<T>>,
     current: Node<T>,
+}
+
+impl<T> Debug for Cursor<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cursor")
+            .field("atm_ptr", &self.atm_ptr)
+            .field("current", &self.current)
+            .finish()
+    }
 }
 
 impl<T> Cursor<T> {
