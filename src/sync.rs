@@ -284,7 +284,7 @@ impl<T> Node<T> {
     /// points to ourselves or to another node, given of course that our strong
     /// already points to self.
     pub fn is_list(this: &Self) -> bool {
-        Self::ptr_eq(&Self::next(this).strong.load(Ordering::Acquire), this)
+        Self::ptr_eq(this, &Self::next(this).strong.load(Ordering::Acquire))
             && Self::weak_ptr_eq(this, &Self::next(this).weak.load(Ordering::Acquire))
     }
 
@@ -310,7 +310,7 @@ impl<T> Node<T> {
     /// ```
     ///
     /// Treats self as a root into the atomic list of which this node is a node
-    pub fn push_before<F: Fn(&T) -> bool>(&self, elem: T, predicate: F) -> Result<(), T> {
+    pub fn push_before<F: Fn(&T) -> bool>(&self, elem: T, predicate: F) -> Result<Self, T> {
         let new_node = Node::new(elem);
 
         // Walk the ring looking for the first node whose value satisfies the predicate,
@@ -334,8 +334,9 @@ impl<T> Node<T> {
                 //
                 // The thought process goes: as long as we have a strong edge our weak
                 // edge is completely irrelevant. So modifications must only happen to
-                // our weak edge when (a) we are creating a new list, see `into_new_ring`
-                // or (b) we are modifying our strong edge, see `pop_when`.
+                // our weak edge when
+                //     (a) we are creating a new list, see `into_new_ring`
+                //     (b) we are modifying our strong edge, see `pop_when`
                 // weak.store(next.downgrade(), Ordering::Release);
 
                 // Attempt to install the new node as `current.next`. If another thread
@@ -348,7 +349,7 @@ impl<T> Node<T> {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        break Ok(());
+                        break Ok(new_node);
                     }
                     Err(CASErr { new, .. }) => drop(new),
                 }
@@ -357,7 +358,7 @@ impl<T> Node<T> {
             current = next;
 
             // We have circled back to the start without finding a match; return the
-            // element to the caller rather than leaking the allocation.
+            // element to the caller rather than dropping the allocation.
             if Node::ptr_eq(self, &current) {
                 break Err(Node::try_unwrap(new_node)
                     .map_err(|_| "unwrapping Node<T> failure")
@@ -868,8 +869,8 @@ impl<T> Node<T> {
     /// let weak = Node::downgrade(&node);
     /// assert!(Node::weak_ptr_eq(&node, &weak));
     /// ```
-    pub fn weak_ptr_eq(lhs: &Self, rhs: &WeakNode<T>) -> bool {
-        ptr::addr_eq(Node::as_ptr(lhs), WeakNode::as_ptr(rhs))
+    pub fn weak_ptr_eq(strong: &Self, weak: &WeakNode<T>) -> bool {
+        ptr::addr_eq(Node::as_ptr(strong), WeakNode::as_ptr(weak))
     }
 }
 
@@ -980,7 +981,7 @@ impl<T> Node<T> {
 
         for value in iter {
             match tail.push_before(value, &predicate) {
-                Ok(()) => tail = Node::load_next_strong(&tail),
+                Ok(_) => tail = Node::load_next_strong(&tail),
                 Err(v) => failed.push(v),
             }
         }
@@ -999,7 +1000,7 @@ impl<T> Node<T> {
 
         for (value, predicate) in iter {
             match tail.push_before(value, &predicate) {
-                Ok(()) => tail = Node::load_next_strong(&tail),
+                Ok(_) => tail = Node::load_next_strong(&tail),
                 Err(v) => failed.push((v, predicate)),
             }
         }
