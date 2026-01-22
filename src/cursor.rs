@@ -35,6 +35,7 @@ use std::{
 pub struct Cursor<T> {
     atm_ptr: Arc<NonNullAtomicNode<T>>,
     current: Node<T>,
+    peek: Option<Node<T>>,
 }
 
 impl<T> Debug for Cursor<T> {
@@ -52,6 +53,7 @@ impl<T> Cursor<T> {
         Self {
             current: node.clone(),
             atm_ptr: Arc::new(NonNullAtomicP::new(node)),
+            peek: None,
         }
     }
 
@@ -59,8 +61,9 @@ impl<T> Cursor<T> {
     ///
     /// This lets a cursor that has been idle catch up to a sibling that already
     /// advanced the shared position.
-    pub fn reload(&mut self) -> &Self {
+    pub fn reload(&mut self) -> &mut Self {
         self.current = self.atm_ptr.load(Ordering::Relaxed);
+        self.peek = None;
         self
     }
 
@@ -68,8 +71,13 @@ impl<T> Cursor<T> {
     ///
     /// This resolves through weak breadcrumbs just like [`Iterator::next`],
     /// but leaves the shared atomic pointer untouched.
-    pub fn peek(&self) -> Option<Node<T>> {
-        Node::resolve_next(&self.current)
+    pub fn peek(&mut self) -> Option<Node<T>> {
+        if let Some(peek) = self.peek.clone() {
+            Some(peek)
+        } else {
+            self.peek = Node::resolve_next(&self.current);
+            self.peek.clone()
+        }
     }
 
     /// Get access to the underlying node the cursor currently references.
@@ -90,11 +98,11 @@ impl<T> Cursor<T> {
     /// If you are not interested in the potential Err(Self), use [`into_p`](Self::into_p)
     /// instead, as it optimizes for the guaranteed drop of self.
     pub fn try_unwrap(this: Self) -> Result<Node<T>, Self> {
-        let Self { atm_ptr, current } = this;
+        let Self { atm_ptr, current, peek } = this;
 
         Arc::try_unwrap(atm_ptr)
             .map(NonNullAtomicP::into_p)
-            .map_err(|atm_ptr| Self { atm_ptr, current })
+            .map_err(|atm_ptr| Self { atm_ptr, current, peek })
     }
 
     pub fn increment(this: &mut Self) -> bool {
@@ -105,7 +113,7 @@ impl<T> Cursor<T> {
             // Nobody else has advanced the shared pointer yet.
             if Node::ptr_eq(&this.current, &loaded) {
                 // If we are unable to resolve a next, incrementing does not make sense.
-                if let Some(next) = Node::resolve_next(&this.current) {
+                if let Some(next) = this.peek() {
                     // Attempt to publish the successor. On success we hand that
                     // node out; on failure we yield the node installed by another
                     // thread to keep all holders in sync.
@@ -149,6 +157,7 @@ impl<T> Clone for Cursor<T> {
         Self {
             atm_ptr: Arc::clone(&self.atm_ptr),
             current: self.current.clone(),
+            peek: self.peek.clone(),
         }
     }
 }
